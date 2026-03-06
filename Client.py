@@ -1,7 +1,4 @@
-"""
-client.py  –  Client de salle vidéo partagée
-Interface grille dynamique (style appel vidéo groupé)
-"""
+
 import customtkinter as ctk
 import tkinter as tk
 import cv2

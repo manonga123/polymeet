@@ -1,8 +1,6 @@
-"""
-client.py  –  Client de salle vidéo partagée
-Interface grille dynamique (style appel vidéo groupé)
-"""
+
 import customtkinter as ctk
+import tkinter as tk
 import cv2
 import threading
 import asyncio
@@ -11,69 +9,89 @@ import json
 import base64
 import math
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageTk
 import pyaudio
 import tkinter.messagebox as msgbox
+import warnings
+import os
+
+warnings.filterwarnings("ignore")
+os.environ["PYTHONWARNINGS"] = "ignore"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ─── Paramètres à adapter ───────────────────────
-DROIDCAM_IP   = "192.168.0.45"   # IP affichée sur l'app DroidCam
+DROIDCAM_IP   = "192.168.0.21"   # IP affichée sur l'app DroidCam
 DROIDCAM_PORT = 4747
-SERVER_IP     = "192.168.0.X"    # ← IP du PC qui lance server.py
+SERVER_IP     = "192.168.0.11"   # IP du PC hôte
 SERVER_PORT   = 9765
 # ────────────────────────────────────────────────
 
-FRAME_QUALITY = 45
+FRAME_QUALITY = 50
 FRAME_RESIZE  = (320, 240)
 
 
-def get_camera_source():
+def find_camera_source():
+    """Teste DroidCam puis webcam locale. Vérifie qu'on reçoit vraiment des frames."""
+    # 1. DroidCam via HTTP MJPEG
     url = f"http://{DROIDCAM_IP}:{DROIDCAM_PORT}/mjpegfeed"
     cap = cv2.VideoCapture(url)
     if cap.isOpened():
+        ret, frame = cap.read()
         cap.release()
-        return url, "📱 DroidCam"
-    cap = cv2.VideoCapture(0)
-    if cap.isOpened():
-        cap.release()
-        return 0, "💻 Webcam"
+        if ret and frame is not None:
+            print(f"[Camera] DroidCam trouvé : {url}")
+            return url, "📱 DroidCam"
+
+    # 2. Webcam locale index 0, 1, 2
+    for idx in range(3):
+        cap = cv2.VideoCapture(idx)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                print(f"[Camera] Webcam locale index {idx}")
+                return idx, f"💻 Webcam ({idx})"
+
+    print("[Camera] Aucune caméra disponible")
     return None, None
 
 
 # ──────────────────────────────────────────────────────
-#  Tuile vidéo d'un participant
+#  Tuile vidéo — tk.Frame natif (compatible place())
 # ──────────────────────────────────────────────────────
-class VideoTile(ctk.CTkFrame):
+class VideoTile(tk.Frame):
     def __init__(self, parent, name, is_me=False, **kwargs):
-        super().__init__(parent, corner_radius=10,
-                         fg_color="#0d1117", **kwargs)
-        self.name    = name
-        self.is_me   = is_me
+        bg = "#0d1117"
+        super().__init__(parent, bg=bg, **kwargs)
+        self.name  = name
+        self.is_me = is_me
 
-        # Bandeau nom en bas
-        color = "#1a4a8a" if is_me else "#1a1a2e"
-        tag   = " (Vous)" if is_me else ""
-        self.name_bar = ctk.CTkLabel(
-            self, text=f"  {name}{tag}  ",
-            font=("Arial", 11, "bold"),
-            fg_color=color, corner_radius=0,
-            anchor="w", height=24)
+        bar_bg = "#1a4a8a" if is_me else "#2a2a4a"
+        tag    = " (Vous)" if is_me else ""
+        self.name_bar = tk.Label(
+            self, text=f"  {name}{tag}",
+            bg=bar_bg, fg="white",
+            font=("Arial", 10, "bold"),
+            anchor="w", height=1)
         self.name_bar.pack(side="bottom", fill="x")
 
-        # Zone image
-        self.img_label = ctk.CTkLabel(
-            self, text="⏳", font=("Arial", 28), text_color="#444")
-        self.img_label.pack(expand=True, fill="both", padx=2, pady=2)
+        self.img_label = tk.Label(
+            self, text="⏳\nEn attente…",
+            bg=bg, fg="#555", font=("Arial", 16))
+        self.img_label.pack(expand=True, fill="both")
 
     def update_frame(self, pil_image):
-        w = max(self.winfo_width()  - 4,  120)
-        h = max(self.winfo_height() - 28, 80)
-        img     = pil_image.resize((w, h), Image.LANCZOS)
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(w, h))
-        self.img_label.configure(image=ctk_img, text="")
-        self.img_label.image = ctk_img
+        try:
+            w = max(self.winfo_width()  - 2, 120)
+            h = max(self.winfo_height() - 26, 80)
+            img   = pil_image.resize((w, h), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self.img_label.configure(image=photo, text="")
+            self.img_label.image = photo
+        except Exception as e:
+            print(f"[Tile] Erreur affichage : {e}")
 
 
 # ──────────────────────────────────────────────────────
@@ -96,22 +114,23 @@ class VideoCallApp(ctk.CTk):
         self.frame_job    = None
         self.my_name      = "Moi"
 
-        self.audio         = pyaudio.PyAudio()
+        try:
+            self.audio = pyaudio.PyAudio()
+        except Exception:
+            self.audio = None
         self.audio_stream  = None
         self.audio_running = False
 
-        # { name: VideoTile }  — inclut MA tuile
-        self.tiles     = {}
-        self.my_tile   = None
+        self.tiles   = {}
+        self.my_tile = None
 
         self._build_ui()
-        self.bind("<Configure>", self._on_resize)
+        self.bind("<Configure>", lambda e: self.after(100, self._relayout_grid))
 
     # ─────────────────────────────────────────────
-    #  UI
+    #  Interface
     # ─────────────────────────────────────────────
     def _build_ui(self):
-        # ── Barre du haut ──
         topbar = ctk.CTkFrame(self, height=52, fg_color="#161b22", corner_radius=0)
         topbar.pack(fill="x", side="top")
         topbar.pack_propagate(False)
@@ -129,125 +148,114 @@ class VideoCallApp(ctk.CTk):
             font=("Arial", 11), text_color="#aaa")
         self.members_lbl.pack(side="right", padx=10)
 
-        # ── Formulaire connexion ──
-        form = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=0, height=48)
+        form = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=0, height=50)
         form.pack(fill="x", side="top")
         form.pack_propagate(False)
 
         ctk.CTkLabel(form, text="Nom :", width=40,
                      font=("Arial", 11)).pack(side="left", padx=(14, 2))
-        self.name_entry = ctk.CTkEntry(form, placeholder_text="Votre prénom",
-                                       width=130, height=30)
+        self.name_entry = ctk.CTkEntry(
+            form, placeholder_text="Votre prénom", width=130, height=32)
         self.name_entry.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(form, text="Salle :", width=40,
                      font=("Arial", 11)).pack(side="left", padx=(0, 2))
-        self.room_entry = ctk.CTkEntry(form, placeholder_text="general",
-                                       width=110, height=30)
+        self.room_entry = ctk.CTkEntry(
+            form, placeholder_text="general", width=110, height=32)
         self.room_entry.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(form, text="IP serveur :", width=70,
                      font=("Arial", 11)).pack(side="left", padx=(0, 2))
-        self.server_entry = ctk.CTkEntry(form, placeholder_text=SERVER_IP,
-                                         width=130, height=30)
+        self.server_entry = ctk.CTkEntry(
+            form, placeholder_text=SERVER_IP, width=130, height=32)
         self.server_entry.pack(side="left", padx=(0, 10))
 
+        self.cam_status = ctk.CTkLabel(
+            form, text="📷 —", font=("Arial", 10), text_color="#888")
+        self.cam_status.pack(side="left", padx=(0, 10))
+
         self.join_btn = ctk.CTkButton(
-            form, text="📞 Rejoindre", width=110, height=30,
+            form, text="📞 Rejoindre", width=110, height=32,
             fg_color="#1a7a3c", hover_color="#145e2e",
             font=("Arial", 12, "bold"), command=self._join)
         self.join_btn.pack(side="left", padx=(0, 6))
 
         self.leave_btn = ctk.CTkButton(
-            form, text="📵 Quitter", width=90, height=30,
+            form, text="📵 Quitter", width=90, height=32,
             fg_color="#b03030", hover_color="#8a2020",
             font=("Arial", 12, "bold"),
             command=self._leave, state="disabled")
         self.leave_btn.pack(side="left")
 
-        # ── Zone centrale (grille + chat) ──
         center = ctk.CTkFrame(self, fg_color="transparent")
-        center.pack(fill="both", expand=True, side="top")
+        center.pack(fill="both", expand=True)
 
-        # Grille vidéo (occupe tout l'espace disponible)
-        self.grid_container = ctk.CTkFrame(center, fg_color="#0d1117", corner_radius=0)
-        self.grid_container.pack(side="left", fill="both", expand=True)
+        grid_outer = ctk.CTkFrame(center, fg_color="#0d1117", corner_radius=0)
+        grid_outer.pack(side="left", fill="both", expand=True)
 
-        self.grid_canvas = ctk.CTkFrame(self.grid_container, fg_color="#0d1117")
-        self.grid_canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        self.grid_canvas = tk.Frame(grid_outer, bg="#0d1117")
+        self.grid_canvas.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # Panneau chat (côté droit, rétractable)
-        self.chat_panel = ctk.CTkFrame(center, width=270, fg_color="#161b22",
-                                       corner_radius=0)
-        self.chat_panel.pack(side="right", fill="y")
-        self.chat_panel.pack_propagate(False)
+        chat_panel = ctk.CTkFrame(center, width=270, fg_color="#161b22",
+                                   corner_radius=0)
+        chat_panel.pack(side="right", fill="y")
+        chat_panel.pack_propagate(False)
 
-        ctk.CTkLabel(self.chat_panel, text="💬 Chat",
+        ctk.CTkLabel(chat_panel, text="💬 Chat",
                      font=("Arial", 13, "bold")).pack(pady=(10, 4))
 
-        self.chat_box = ctk.CTkTextbox(self.chat_panel, font=("Arial", 11),
-                                        wrap="word")
+        self.chat_box = ctk.CTkTextbox(chat_panel, font=("Arial", 11), wrap="word")
         self.chat_box.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self.chat_box.configure(state="disabled")
 
-        chat_input = ctk.CTkFrame(self.chat_panel, fg_color="transparent")
-        chat_input.pack(fill="x", padx=8, pady=(0, 10))
-        self.chat_entry = ctk.CTkEntry(chat_input, placeholder_text="Message…",
-                                        height=30)
+        chat_row = ctk.CTkFrame(chat_panel, fg_color="transparent")
+        chat_row.pack(fill="x", padx=8, pady=(0, 10))
+        self.chat_entry = ctk.CTkEntry(
+            chat_row, placeholder_text="Message…", height=32)
         self.chat_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.chat_entry.bind("<Return>", lambda e: self._send_chat())
-        ctk.CTkButton(chat_input, text="↩", width=34, height=30,
+        ctk.CTkButton(chat_row, text="↩", width=34, height=32,
                       command=self._send_chat).pack(side="left")
 
     # ─────────────────────────────────────────────
     #  Grille dynamique
     # ─────────────────────────────────────────────
     def _relayout_grid(self):
-        """Recalcule la grille en fonction du nombre de participants."""
         n = len(self.tiles)
         if n == 0:
             return
-
-        # Détruire l'arrangement précédent (sans détruire les widgets)
-        for tile in self.tiles.values():
-            tile.place_forget()
-
         cw = self.grid_canvas.winfo_width()
         ch = self.grid_canvas.winfo_height()
-        if cw < 10 or ch < 10:
-            self.after(100, self._relayout_grid)
+        if cw < 20 or ch < 20:
+            self.after(200, self._relayout_grid)
             return
 
-        # Calcul du meilleur ratio colonnes/lignes
-        cols = math.ceil(math.sqrt(n))
+        cols = max(1, math.ceil(math.sqrt(n)))
         rows = math.ceil(n / cols)
+        gap  = 4
+        tw   = max(100, (cw - (cols + 1) * gap) // cols)
+        th   = max(80,  (ch - (rows + 1) * gap) // rows)
 
-        tw = (cw - (cols + 1) * 4) // cols
-        th = (ch - (rows + 1) * 4) // rows
-
-        tiles_list = list(self.tiles.values())
-        for idx, tile in enumerate(tiles_list):
+        for idx, tile in enumerate(self.tiles.values()):
             row = idx // cols
             col = idx %  cols
-            x = 4 + col * (tw + 4)
-            y = 4 + row * (th + 4)
+            x   = gap + col * (tw + gap)
+            y   = gap + row * (th + gap)
             tile.place(x=x, y=y, width=tw, height=th)
 
-    def _on_resize(self, event=None):
-        if self.tiles:
-            self.after(50, self._relayout_grid)
-
     def _add_tile(self, name, is_me=False):
+        if name in self.tiles:
+            return self.tiles[name]
         tile = VideoTile(self.grid_canvas, name, is_me=is_me)
         self.tiles[name] = tile
-        self._relayout_grid()
+        self.after(150, self._relayout_grid)
         return tile
 
     def _remove_tile(self, name):
         if name in self.tiles:
             self.tiles[name].destroy()
             del self.tiles[name]
-            self._relayout_grid()
+            self.after(150, self._relayout_grid)
 
     # ─────────────────────────────────────────────
     #  Connexion
@@ -256,21 +264,23 @@ class VideoCallApp(ctk.CTk):
         name   = self.name_entry.get().strip() or "Anonyme"
         room   = self.room_entry.get().strip()  or "general"
         srv_ip = self.server_entry.get().strip() or SERVER_IP
-
-        if srv_ip == "192.168.0.X":
-            msgbox.showerror("Erreur", "Entrez l'IP du serveur (PC hôte).")
-            return
+        uri    = f"ws://{srv_ip}:{SERVER_PORT}"
 
         self.my_name = name
-        uri = f"ws://{srv_ip}:{SERVER_PORT}"
+        self.cam_status.configure(text="📷 Recherche…", text_color="#aaa")
+        self.update()
 
-        src, lbl = get_camera_source()
+        src, lbl = find_camera_source()
         if src is None:
+            self.cam_status.configure(text="📷 Aucune caméra", text_color="#e07050")
             msgbox.showwarning("Caméra",
-                               "Aucune caméra détectée.\nVidéo désactivée.")
-        self.cam_source = src
+                               "Aucune caméra détectée.\n"
+                               "Vérifiez que DroidCam est lancé\n"
+                               "ou qu'une webcam est branchée.")
+        else:
+            self.cam_status.configure(text=f"📷 {lbl}", text_color="#7ec88a")
 
-        # Créer MA tuile immédiatement
+        self.cam_source = src
         self.my_tile = self._add_tile(name, is_me=True)
 
         self.loop = asyncio.new_event_loop()
@@ -288,6 +298,7 @@ class VideoCallApp(ctk.CTk):
                 self.ws = ws
                 await ws.send(json.dumps(
                     {"type": "join", "name": name, "room": room}))
+                # Démarrer la caméra dès la connexion établie
                 self.after(0, self._start_capture)
                 async for raw in ws:
                     self._on_message(raw)
@@ -305,31 +316,26 @@ class VideoCallApp(ctk.CTk):
             self.after(0, lambda: self._on_joined(data))
         elif t == "user_joined":
             n = data["name"]
-            self.after(0, lambda: (
-                self._add_tile(n),
-                self._add_chat_line(f"✅ {n} a rejoint la salle")
-            ))
+            self.after(0, lambda: self._add_tile(n))
+            self.after(0, lambda: self._add_chat_line(f"✅ {n} a rejoint"))
         elif t == "user_left":
             n = data["name"]
-            self.after(0, lambda: (
-                self._remove_tile(n),
-                self._add_chat_line(f"👋 {n} a quitté la salle")
-            ))
+            self.after(0, lambda: self._remove_tile(n))
+            self.after(0, lambda: self._add_chat_line(f"👋 {n} a quitté"))
         elif t == "members":
             self.after(0, lambda: self._update_members(data["members"]))
         elif t == "video":
-            self.after(0, lambda: self._show_remote_frame(
-                data["name"], data["frame"]))
+            name  = data["name"]
+            frame = data["frame"]
+            self.after(0, lambda: self._show_remote_frame(name, frame))
         elif t == "chat":
             self.after(0, lambda: self._add_chat_line(
                 f"[{data['time']}] {data['name']} : {data['text']}"))
 
     def _on_joined(self, data):
-        self.call_active = True
         self.leave_btn.configure(state="normal")
         self.status_lbl.configure(
-            text=f"⬤ Connecté – {data['room']}",
-            text_color="#4caf50")
+            text=f"⬤ Connecté – {data['room']}", text_color="#4caf50")
         self._add_chat_line(f"✅ Vous avez rejoint « {data['room']} »")
 
     def _on_disconnect(self, reason=""):
@@ -357,14 +363,25 @@ class VideoCallApp(ctk.CTk):
         self.leave_btn.configure(state="disabled")
 
     # ─────────────────────────────────────────────
-    #  Capture vidéo locale
+    #  Capture vidéo  ← CORRECTION PRINCIPALE
     # ─────────────────────────────────────────────
     def _start_capture(self):
         if self.cam_source is None:
+            print("[Camera] Pas de source disponible")
             return
+
+        print(f"[Camera] Ouverture : {self.cam_source}")
         self.cap = cv2.VideoCapture(self.cam_source)
+
         if not self.cap.isOpened():
+            print("[Camera] ❌ Impossible d'ouvrir la caméra")
+            self.cam_status.configure(text="📷 Erreur", text_color="#e07050")
             return
+
+        # ← FIX CRITIQUE : call_active = True ICI (pas dans _on_joined)
+        self.call_active = True
+        print("[Camera] ✅ Capture démarrée")
+        self.cam_status.configure(text="📷 En cours ✅", text_color="#4caf50")
         self._send_frame()
 
     def _stop_capture(self):
@@ -380,18 +397,18 @@ class VideoCallApp(ctk.CTk):
             return
 
         ret, frame = self.cap.read()
-        if ret:
-            # Afficher dans MA tuile
+        if ret and frame is not None:
+            # Ma propre vidéo dans ma tuile
             if self.my_tile and self.my_tile.winfo_exists():
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 self.my_tile.update_frame(Image.fromarray(rgb))
 
-            # Encoder et envoyer au serveur
+            # Encoder et envoyer
             small = cv2.resize(frame, FRAME_RESIZE)
-            _, buf = cv2.imencode(".jpg", small,
-                                  [cv2.IMWRITE_JPEG_QUALITY, FRAME_QUALITY])
-            b64 = base64.b64encode(buf).decode()
-            if self.ws and self.loop:
+            ok, buf = cv2.imencode(
+                ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, FRAME_QUALITY])
+            if ok and self.ws and self.loop and not self.loop.is_closed():
+                b64 = base64.b64encode(buf.tobytes()).decode()
                 asyncio.run_coroutine_threadsafe(
                     self.ws.send(json.dumps({"type": "video", "frame": b64})),
                     self.loop)
@@ -399,7 +416,7 @@ class VideoCallApp(ctk.CTk):
         self.frame_job = self.after(50, self._send_frame)
 
     # ─────────────────────────────────────────────
-    #  Vidéo distante
+    #  Affichage vidéo distante
     # ─────────────────────────────────────────────
     def _show_remote_frame(self, name, b64_frame):
         try:
@@ -409,7 +426,8 @@ class VideoCallApp(ctk.CTk):
             if frame is None:
                 return
             img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        except Exception:
+        except Exception as e:
+            print(f"[Video] Erreur décodage : {e}")
             return
 
         if name not in self.tiles:
@@ -420,9 +438,7 @@ class VideoCallApp(ctk.CTk):
     #  Membres + Chat
     # ─────────────────────────────────────────────
     def _update_members(self, members):
-        self.members_lbl.configure(
-            text=f"👥 {len(members)} participant(s)")
-        # Ajouter les tuiles manquantes
+        self.members_lbl.configure(text=f"👥 {len(members)} participant(s)")
         for m in members:
             if m != self.my_name and m not in self.tiles:
                 self._add_tile(m)
@@ -437,18 +453,19 @@ class VideoCallApp(ctk.CTk):
         text = self.chat_entry.get().strip()
         if not text or not self.ws:
             return
-        if self.loop:
+        if self.loop and not self.loop.is_closed():
             asyncio.run_coroutine_threadsafe(
                 self.ws.send(json.dumps({"type": "chat", "text": text})),
                 self.loop)
         self.chat_entry.delete(0, "end")
 
-    # ─────────────────────────────────────────────
-    #  Fermeture
-    # ─────────────────────────────────────────────
     def on_closing(self):
         self._leave()
-        self.audio.terminate()
+        if self.audio:
+            try:
+                self.audio.terminate()
+            except Exception:
+                pass
         self.destroy()
 
 

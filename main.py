@@ -8,7 +8,7 @@ import tkinter.messagebox as msgbox
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-DROIDCAM_IP   = "192.168.0.45"   # ← IP affichée sur l'app DroidCam
+DROIDCAM_IP   = "192.168.0.17"   # ← IP affichée sur l'app DroidCam
 DROIDCAM_PORT = 4747
 
 # ──────────────────────────────────────────────

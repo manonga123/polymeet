@@ -23,11 +23,7 @@ var/
 .installed.cfg
 *.egg
 
-# Virtual environment
-.venv/
-env/
-venv/
-ENV/
+
 
 # PyCharm
 .idea/

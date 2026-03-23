@@ -40,6 +40,51 @@ from collections import deque
 # ── pydub pour export MP3 ────────────────────────────────────────────────────
 try:
     from pydub import AudioSegment
+
+    # Fix Windows : ffmpeg pas toujours dans le PATH selon le terminal utilisé
+    import shutil, sys
+    _ffmpeg = shutil.which("ffmpeg")
+    if not _ffmpeg:
+        # Chercher dans le venv actif en priorité
+        _venv_dirs = []
+        if hasattr(sys, "prefix"):
+            _venv_dirs += [
+                os.path.join(sys.prefix, "bin", "ffmpeg.exe"),
+                os.path.join(sys.prefix, "Scripts", "ffmpeg.exe"),
+                os.path.join(sys.prefix, "Library", "bin", "ffmpeg.exe"),
+            ]
+        # Emplacements courants sur Windows
+        _candidates = _venv_dirs + [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+            os.path.expanduser(r"~\ffmpeg\bin\ffmpeg.exe"),
+            os.path.expanduser(r"~\scoop\apps\ffmpeg\current\bin\ffmpeg.exe"),
+        ]
+        for c in _candidates:
+            c = os.path.expandvars(c)
+            if os.path.isfile(c):
+                _ffmpeg = c
+                break
+
+    if _ffmpeg:
+        AudioSegment.converter = _ffmpeg
+        AudioSegment.ffmpeg    = _ffmpeg
+        print(f"[Audio] ffmpeg trouvé : {_ffmpeg}")
+    else:
+        # Chemin WinGet connu — à adapter si différent sur votre machine
+        _winget_path = os.path.expanduser(
+            r"~\AppData\Local\Microsoft\WinGet\Packages"
+            r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+            r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe")
+        if os.path.isfile(_winget_path):
+            AudioSegment.converter = _winget_path
+            AudioSegment.ffmpeg    = _winget_path
+            print(f"[Audio] ffmpeg WinGet trouvé : {_winget_path}")
+        else:
+            print("[Audio] ⚠ ffmpeg introuvable — export en .wav (MP3 désactivé)")
+            print("         Lancez depuis le terminal VSCode ou ajoutez ffmpeg au PATH système")
+
     PYDUB_AVAILABLE = True
 except ImportError:
     PYDUB_AVAILABLE = False
@@ -56,6 +101,14 @@ except ImportError:
     TRANSCRIPTION_AVAILABLE = False
     print("[Client] transcription_engine.py introuvable — F-03 désactivé")
 
+# ── DiarizationEngine [F-04] ─────────────────────────────────────────────────
+try:
+    from diarization_engine import DiarizationEngine, SPEAKER_COLORS
+    DIARIZATION_AVAILABLE = True
+except ImportError:
+    DIARIZATION_AVAILABLE = False
+    print("[Client] diarization_engine.py introuvable — F-04 désactivé")
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -71,17 +124,41 @@ FRAME_RESIZE      = (320, 240)
 FRAME_INTERVAL_MS = 50        # ~20 fps
 
 # ─── Paramètres audio ───────────────────────────────────────────────────────
-AUDIO_RATE      = 16000
+# 44100 Hz = taux universel compatible avec tous les micros (DroidCam inclus)
+AUDIO_RATE      = 44100
 AUDIO_CHANNELS  = 1
 AUDIO_FORMAT    = pyaudio.paInt16
-AUDIO_CHUNK     = 1024
+AUDIO_CHUNK     = 2048         # plus grand chunk pour 44100 Hz
 AUDIO_VAD_RMS   = 300
 AUDIO_QUEUE_MAX = 8
+# Taux cible pour Whisper (il faut 16000 Hz) — on rééchantillonne à la volée
+WHISPER_RATE    = 16000
 
 # ─── Paramètres enregistrement [F-02] ───────────────────────────────────────
 RECORDINGS_DIR      = "recordings"
 AUTOSAVE_INTERVAL_S = 300          # 5 minutes
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+# ─── Liste des microphones disponibles ──────────────────────────────────────
+def list_microphones():
+    """
+    Retourne une liste de tuples (device_index, label, sample_rate)
+    pour tous les micros disponibles sur le système.
+    """
+    mics = []
+    try:
+        pa = pyaudio.PyAudio()
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if info['maxInputChannels'] > 0:
+                rate = int(info['defaultSampleRate'])
+                label = f"🎤 [{i}] {info['name']} ({rate} Hz)"
+                mics.append((i, label, rate))
+        pa.terminate()
+    except Exception as e:
+        print(f"[Mic] Erreur détection : {e}")
+    return mics
 
 
 # ─── Détection de TOUTES les sources caméra disponibles ─────────────────────
@@ -157,9 +234,12 @@ class VideoTile(tk.Frame):
 
 # ─── Moteur audio ────────────────────────────────────────────────────────────
 class AudioEngine:
-    def __init__(self, on_chunk_ready, on_record_chunk=None):
+    def __init__(self, on_chunk_ready, on_record_chunk=None,
+                 device_index=None, device_rate=None):
         self.on_chunk_ready  = on_chunk_ready
-        self.on_record_chunk = on_record_chunk   # callback [F-02]
+        self.on_record_chunk = on_record_chunk
+        self.device_index    = device_index       # None = périphérique par défaut
+        self.device_rate     = device_rate or AUDIO_RATE
         self.pa              = None
         self.in_stream       = None
         self.out_stream      = None
@@ -176,16 +256,32 @@ class AudioEngine:
             print(f"[Audio] PyAudio indisponible : {e}")
             return False
 
+        # Résoudre le périphérique par défaut si non spécifié
+        if self.device_index is None:
+            try:
+                info = self.pa.get_default_input_device_info()
+                self.device_index = info["index"]
+                self.device_rate  = int(info["defaultSampleRate"])
+            except Exception:
+                self.device_index = None
+                self.device_rate  = AUDIO_RATE
+
+        print(f"[Audio] Micro index={self.device_index}, taux={self.device_rate} Hz")
+
         try:
-            self.in_stream = self.pa.open(
+            kwargs = dict(
                 format=AUDIO_FORMAT,
                 channels=AUDIO_CHANNELS,
-                rate=AUDIO_RATE,
+                rate=self.device_rate,
                 input=True,
                 frames_per_buffer=AUDIO_CHUNK,
                 stream_callback=self._capture_callback
             )
+            if self.device_index is not None:
+                kwargs["input_device_index"] = self.device_index
+            self.in_stream = self.pa.open(**kwargs)
             self.in_stream.start_stream()
+            print(f"[Audio] ✅ Capture micro démarrée ({self.device_rate} Hz)")
         except Exception as e:
             print(f"[Audio] ❌ Micro : {e}")
             return False
@@ -194,10 +290,11 @@ class AudioEngine:
             self.out_stream = self.pa.open(
                 format=AUDIO_FORMAT,
                 channels=AUDIO_CHANNELS,
-                rate=AUDIO_RATE,
+                rate=self.device_rate,
                 output=True,
                 frames_per_buffer=AUDIO_CHUNK
             )
+            print(f"[Audio] ✅ Lecture audio démarrée")
         except Exception as e:
             print(f"[Audio] ❌ HP : {e}")
             return False
@@ -241,12 +338,26 @@ class AudioEngine:
         with self._lock:
             self.audio_queues.pop(name, None)
 
+    def resample_to_whisper(self, raw_bytes: bytes) -> bytes:
+        """Rééchantillonne de device_rate vers WHISPER_RATE (16000 Hz)."""
+        if self.device_rate == WHISPER_RATE:
+            return raw_bytes
+        try:
+            samples  = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
+            ratio    = WHISPER_RATE / self.device_rate
+            new_len  = max(1, int(len(samples) * ratio))
+            resampled = np.interp(
+                np.linspace(0, len(samples) - 1, new_len),
+                np.arange(len(samples)), samples
+            ).astype(np.int16)
+            return resampled.tobytes()
+        except Exception:
+            return raw_bytes
+
     def _capture_callback(self, in_data, frame_count, time_info, status):
         if in_data:
-            # Toujours envoyer au recorder même si muté [F-02]
             if self.on_record_chunk:
                 self.on_record_chunk(in_data)
-
             if not self.muted:
                 samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
                 rms = float(np.sqrt(np.mean(samples ** 2))) if len(samples) > 0 else 0.0
@@ -496,9 +607,14 @@ class VideoCallApp(ctk.CTk):
         self.cam_index    = 0
         self.cam_source   = None
 
+        # Microphones [F-01]
+        self.mic_sources  = []   # liste (device_index, label, rate)
+        self.mic_index    = 0    # index courant dans mic_sources
+
         self.audio_engine:         AudioEngine    | None = None
         self.recording_engine:     RecordingEngine        = RecordingEngine()
         self.transcription_engine                         = None  # [F-03]
+        self.diarization_engine                           = None  # [F-04]
 
         self.tiles   = {}
         self.my_tile = None
@@ -565,7 +681,20 @@ class VideoCallApp(ctk.CTk):
 
         self.mic_status = ctk.CTkLabel(
             form, text="🎤 —", font=("Arial", 10), text_color="#888")
-        self.mic_status.pack(side="left", padx=(0, 6))
+        self.mic_status.pack(side="left", padx=(0, 4))
+
+        # Sélecteur de micro [F-01]
+        self._mic_var = tk.StringVar(value="— Micro —")
+        self.mic_selector = ctk.CTkOptionMenu(
+            form, variable=self._mic_var,
+            values=["— Micro —"],
+            width=180, height=28,
+            font=("Arial", 9),
+            fg_color="#1a2a3a", button_color="#1e3248",
+            command=self._on_mic_selected)
+        self.mic_selector.pack(side="left", padx=(0, 6))
+        # Peupler la liste au démarrage
+        self._populate_mic_selector()
 
         self.join_btn = ctk.CTkButton(
             form, text="📞 Rejoindre", width=110, height=32,
@@ -655,9 +784,36 @@ class VideoCallApp(ctk.CTk):
         self.trans_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
         # (caché par défaut — affiché via _switch_tab)
 
+        # ── Sous-panneau Speakers [F-04] ─────────────────────────────────
+        self.speakers_panel = ctk.CTkFrame(
+            self.trans_frame, fg_color="#0d1520",
+            corner_radius=6, border_width=1, border_color="#1e2d45")
+        self.speakers_panel.pack(fill="x", padx=8, pady=(6, 4))
+
+        spk_header = ctk.CTkFrame(self.speakers_panel, fg_color="transparent")
+        spk_header.pack(fill="x", padx=8, pady=(4, 2))
+
+        ctk.CTkLabel(spk_header, text="👥 Participants",
+                     font=("Arial", 10, "bold"),
+                     text_color="#4a7abf").pack(side="left")
+
+        self.spk_count_lbl = ctk.CTkLabel(
+            spk_header, text="0 speaker(s)",
+            font=("Arial", 9), text_color="#555")
+        self.spk_count_lbl.pack(side="right")
+
+        # Zone scrollable pour les badges speakers
+        self.spk_list_frame = ctk.CTkScrollableFrame(
+            self.speakers_panel, fg_color="transparent",
+            height=70, scrollbar_button_color="#1e2d45")
+        self.spk_list_frame.pack(fill="x", padx=4, pady=(0, 4))
+
+        # Dict pour stocker les widgets badges : auto_name → frame
+        self._speaker_badges = {}
+
         # Status langue détectée
         trans_top = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
-        trans_top.pack(fill="x", padx=8, pady=(6, 2))
+        trans_top.pack(fill="x", padx=8, pady=(2, 2))
 
         ctk.CTkLabel(trans_top, text="Langue :",
                      font=("Arial", 10), text_color="#555").pack(side="left")
@@ -803,13 +959,13 @@ class VideoCallApp(ctk.CTk):
             self.trans_status_lbl.configure(text="⬤ Inactif", text_color="#444")
             self._add_chat_line("📝 Transcription désactivée")
 
-    def _on_transcript_segment(self, text: str, language: str, timestamp: str):
+    def _on_transcript_segment(self, text: str, language: str, timestamp: str,
+                               speaker_label: str = "?", speaker_color: str = "#aaa"):
         """
         Callback appelé par TranscriptionEngine (thread Whisper).
         On repasse dans le thread UI via after().
         """
         def _update():
-            # Langue
             lang_names = {
                 "fr": "Français 🇫🇷", "en": "English 🇬🇧",
                 "mg": "Malagasy 🇲🇬", "ar": "Arabe 🇸🇦",
@@ -820,13 +976,22 @@ class VideoCallApp(ctk.CTk):
             lang_display = lang_names.get(language, language.upper())
             self.trans_lang_lbl.configure(text=lang_display)
 
-            # Ajouter le texte dans la zone de transcription
-            line = f"[{timestamp}]  {text}\n"
-            self.trans_box.insert("end", line)
+            # Affichage avec nom du speaker coloré via tag
+            tag = f"spk_{speaker_label.replace(' ', '_')}"
+            try:
+                self.trans_box._textbox.tag_configure(
+                    tag, foreground=speaker_color)
+            except Exception:
+                pass
+
+            self.trans_box.configure(state="normal")
+            self.trans_box._textbox.insert("end", f"[{timestamp}] ", "timestamp")
+            self.trans_box._textbox.insert("end", f"{speaker_label}: ", tag)
+            self.trans_box._textbox.insert("end", f"{text}\n")
+            self.trans_box._textbox.tag_configure("timestamp", foreground="#555")
             self.trans_box.see("end")
 
-            # Basculer automatiquement sur l'onglet transcription
-            # si l'utilisateur est sur chat (discret : seulement 1 fois)
+            # Notif sur l'onglet si l'utilisateur est sur chat
             if self._active_tab.get() == "chat":
                 self.tab_trans_btn.configure(text="📝 Transcription ●")
 
@@ -834,12 +999,176 @@ class VideoCallApp(ctk.CTk):
 
     def _on_record_chunk_and_transcribe(self, raw_bytes: bytes):
         """
-        Callback unifié : envoie le chunk à RecordingEngine ET à
-        TranscriptionEngine si actif.
+        Callback unifié : envoie le chunk à RecordingEngine,
+        TranscriptionEngine (rééchantillonné à 16000 Hz) et DiarizationEngine.
         """
         self.recording_engine.add_chunk(raw_bytes)
         if self.transcription_engine and self.transcription_engine.is_running:
-            self.transcription_engine.feed(raw_bytes)
+            # Rééchantillonnage vers 16000 Hz requis par Whisper
+            whisper_chunk = (self.audio_engine.resample_to_whisper(raw_bytes)
+                             if self.audio_engine else raw_bytes)
+            self.transcription_engine.feed(whisper_chunk)
+        # Mode présentiel : analyse vocale locale
+        if (self.diarization_engine and
+                self.diarization_engine._mode == DiarizationEngine.MODE_PRESENTIEL
+                if DIARIZATION_AVAILABLE else False):
+            self.diarization_engine.feed_local_audio(raw_bytes)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # [F-04] Diarisation — gestion des speakers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _start_diarization(self, mode: str):
+        """Démarre le moteur de diarisation dans le mode indiqué."""
+        if not DIARIZATION_AVAILABLE:
+            return
+        if self.diarization_engine:
+            return
+        self.diarization_engine = DiarizationEngine(
+            on_speaker_change=self._on_speaker_change,
+            on_speakers_updated=self._on_speakers_updated)
+        self.diarization_engine.start(mode=mode)
+        print(f"[Diarization] ▶ Démarré mode {mode}")
+
+    def _stop_diarization(self):
+        if self.diarization_engine:
+            self.diarization_engine.stop()
+            self.diarization_engine = None
+
+    def _on_speaker_change(self, speaker, timestamp: str):
+        """
+        Callback quand le speaker courant change.
+        Appelé depuis thread réseau ou thread diarisation → repasser dans UI.
+        """
+        def _update():
+            if self.transcription_engine:
+                self.transcription_engine.set_current_speaker(
+                    label=speaker.label,
+                    color=speaker.color)
+            # Mettre en surbrillance le badge du speaker actif
+            self._highlight_active_speaker(speaker.auto_name)
+        self.after(0, _update)
+
+    def _on_speakers_updated(self, speakers: dict):
+        """
+        Callback quand la liste des speakers change.
+        Met à jour les badges dans le sous-panneau Speakers.
+        """
+        def _update():
+            self._refresh_speaker_badges(speakers)
+        self.after(0, _update)
+
+    def _refresh_speaker_badges(self, speakers: dict):
+        """Recrée les badges speakers dans le sous-panneau."""
+        # Supprimer les badges obsolètes
+        current_keys = set(speakers.keys())
+        for key in list(self._speaker_badges.keys()):
+            if key not in current_keys:
+                self._speaker_badges[key].destroy()
+                del self._speaker_badges[key]
+
+        # Ajouter / mettre à jour les badges
+        for auto_name, profile in speakers.items():
+            if auto_name not in self._speaker_badges:
+                self._create_speaker_badge(auto_name, profile)
+            else:
+                # Mettre à jour le label si renommé
+                badge = self._speaker_badges[auto_name]
+                try:
+                    badge._name_lbl.configure(text=profile.label)
+                    badge._count_lbl.configure(
+                        text=f"{profile.speech_count} int.")
+                except Exception:
+                    pass
+
+        count = len(speakers)
+        self.spk_count_lbl.configure(
+            text=f"{count} speaker{'s' if count > 1 else ''}")
+
+    def _create_speaker_badge(self, auto_name: str, profile):
+        """Crée un badge coloré pour un speaker dans le sous-panneau."""
+        badge = tk.Frame(self.spk_list_frame, bg="#0d1117",
+                         relief="flat", bd=0)
+        badge.pack(fill="x", padx=2, pady=2)
+
+        # Pastille colorée
+        dot = tk.Label(badge, text="⬤", bg="#0d1117",
+                       fg=profile.color, font=("Arial", 10))
+        dot.pack(side="left", padx=(4, 2))
+
+        # Nom (cliquable pour renommer)
+        name_lbl = tk.Label(badge, text=profile.label,
+                            bg="#0d1117", fg="white",
+                            font=("Arial", 10, "bold"),
+                            cursor="hand2")
+        name_lbl.pack(side="left", padx=(0, 6))
+        # Double-clic → renommer
+        name_lbl.bind("<Double-Button-1>",
+                      lambda e, k=auto_name: self._rename_speaker_dialog(k))
+
+        # Compteur d'interventions
+        count_lbl = tk.Label(badge, text=f"{profile.speech_count} int.",
+                             bg="#0d1117", fg="#555", font=("Arial", 9))
+        count_lbl.pack(side="left")
+
+        # Stocker les refs pour mise à jour ultérieure
+        badge._name_lbl  = name_lbl
+        badge._count_lbl = count_lbl
+        badge._dot       = dot
+        badge._is_active = False
+
+        self._speaker_badges[auto_name] = badge
+
+    def _highlight_active_speaker(self, auto_name: str):
+        """Met en surbrillance le badge du speaker qui parle actuellement."""
+        for key, badge in self._speaker_badges.items():
+            is_active = (key == auto_name)
+            try:
+                bg = "#0d2030" if is_active else "#0d1117"
+                badge.configure(bg=bg)
+                badge._name_lbl.configure(bg=bg)
+                badge._count_lbl.configure(bg=bg)
+                badge._dot.configure(bg=bg)
+            except Exception:
+                pass
+
+    def _rename_speaker_dialog(self, auto_name: str):
+        """Ouvre une mini-fenêtre de renommage pour un speaker."""
+        if not self.diarization_engine:
+            return
+
+        # Fenêtre popup
+        dlg = tk.Toplevel(self)
+        dlg.title("Renommer le participant")
+        dlg.geometry("320x130")
+        dlg.configure(bg="#0d1117")
+        dlg.resizable(False, False)
+        dlg.grab_set()  # modal
+
+        tk.Label(dlg, text=f"Nouveau nom pour « {auto_name} » :",
+                 bg="#0d1117", fg="white",
+                 font=("Arial", 11)).pack(pady=(16, 6))
+
+        entry = ctk.CTkEntry(dlg, placeholder_text="Entrez un nom…",
+                             width=200, height=32)
+        entry.pack()
+        entry.focus()
+
+        def _confirm():
+            new_name = entry.get().strip()
+            if new_name:
+                self.diarization_engine.rename_speaker(auto_name, new_name)
+            dlg.destroy()
+
+        entry.bind("<Return>", lambda e: _confirm())
+
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(pady=10)
+        ctk.CTkButton(btn_row, text="✅ Confirmer", width=110, height=28,
+                      command=_confirm).pack(side="left", padx=6)
+        ctk.CTkButton(btn_row, text="Annuler", width=80, height=28,
+                      fg_color="#333", hover_color="#444",
+                      command=dlg.destroy).pack(side="left")
 
     def _export_transcript(self):
         """Exporte la transcription complète dans un fichier .txt"""
@@ -1122,18 +1451,30 @@ class VideoCallApp(ctk.CTk):
             if len(self.cam_sources) > 1:
                 self.cam_btn.configure(state="normal")
 
-        # AudioEngine avec callbacks recorder + transcription [F-02/F-03]
+        # AudioEngine avec micro sélectionné [F-01/F-02/F-03]
+        dev_idx, dev_rate = self._get_selected_mic()
+        print(f"[Mic] Utilisation : index={dev_idx}, taux={dev_rate} Hz")
         self.audio_engine = AudioEngine(
             on_chunk_ready=self._on_audio_chunk_ready,
-            on_record_chunk=self._on_record_chunk_and_transcribe)
+            on_record_chunk=self._on_record_chunk_and_transcribe,
+            device_index=dev_idx,
+            device_rate=dev_rate)
         ok = self.audio_engine.start()
         if ok:
-            self.mic_status.configure(text="🎤 Actif ✅", text_color="#4caf50")
+            self.mic_status.configure(text=f"🎤 {dev_rate} Hz ✅", text_color="#4caf50")
             self.mute_btn.configure(state="normal")
         else:
             self.mic_status.configure(text="🎤 Erreur", text_color="#e07050")
 
         self.my_tile = self._add_tile(name, is_me=True)
+
+        # Démarrer la diarisation en mode réseau [F-04]
+        self._start_diarization(
+            mode=DiarizationEngine.MODE_NETWORK if DIARIZATION_AVAILABLE else "network")
+        # Se pré-enregistrer soi-même comme speaker
+        if self.diarization_engine:
+            self.diarization_engine.add_network_participant(name)
+
         self.loop = asyncio.new_event_loop()
         self.net_thread = threading.Thread(
             target=self._run_network, args=(uri, name, room), daemon=True)
@@ -1167,6 +1508,51 @@ class VideoCallApp(ctk.CTk):
             asyncio.run_coroutine_threadsafe(
                 self.ws.send(json.dumps({"type": "audio", "chunk": b64_chunk})),
                 self.loop)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # [F-01] Sélecteur de microphone
+    # ──────────────────────────────────────────────────────────────────────────
+    def _populate_mic_selector(self):
+        """Détecte les micros disponibles et peuple le menu déroulant."""
+        self.mic_sources = list_microphones()
+        if not self.mic_sources:
+            self.mic_selector.configure(values=["❌ Aucun micro détecté"])
+            self._mic_var.set("❌ Aucun micro détecté")
+            return
+        labels = [lbl for (_, lbl, _) in self.mic_sources]
+        self.mic_selector.configure(values=labels)
+        # Sélectionner le micro par défaut
+        try:
+            import pyaudio
+            pa = pyaudio.PyAudio()
+            default_idx = pa.get_default_input_device_info()["index"]
+            pa.terminate()
+            for i, (dev_idx, lbl, rate) in enumerate(self.mic_sources):
+                if dev_idx == default_idx:
+                    self.mic_index = i
+                    self._mic_var.set(lbl)
+                    return
+        except Exception:
+            pass
+        self.mic_index = 0
+        self._mic_var.set(labels[0])
+
+    def _on_mic_selected(self, label: str):
+        """Appelé quand l'utilisateur choisit un micro dans le dropdown."""
+        for i, (dev_idx, lbl, rate) in enumerate(self.mic_sources):
+            if lbl == label:
+                self.mic_index = i
+                self.mic_status.configure(
+                    text=f"🎤 {rate} Hz", text_color="#7ec88a")
+                print(f"[Mic] Sélectionné : {lbl}")
+                break
+
+    def _get_selected_mic(self):
+        """Retourne (device_index, rate) du micro actuellement sélectionné."""
+        if not self.mic_sources or self.mic_index >= len(self.mic_sources):
+            return None, AUDIO_RATE
+        dev_idx, lbl, rate = self.mic_sources[self.mic_index]
+        return dev_idx, rate
 
     def _toggle_mute(self):
         if not self.audio_engine:
@@ -1211,13 +1597,18 @@ class VideoCallApp(ctk.CTk):
             n = data["name"]
             self.after(0, lambda n=n: self._add_tile(n))
             self.after(0, lambda n=n: self._add_chat_line(f"✅ {n} a rejoint"))
-            # Horodatage arrivée [F-02]
             self.after(0, lambda n=n: self.recording_engine.log_intervention(n, "A rejoint la réunion"))
+            # [F-04] Enregistrer le nouveau participant
+            if self.diarization_engine:
+                self.after(0, lambda n=n: self.diarization_engine.add_network_participant(n))
         elif t == "user_left":
             n = data["name"]
             self.after(0, lambda n=n: self._remove_tile(n))
             self.after(0, lambda n=n: self._add_chat_line(f"👋 {n} a quitté"))
             self.after(0, lambda n=n: self.recording_engine.log_intervention(n, "A quitté la réunion"))
+            # [F-04] Retirer le participant
+            if self.diarization_engine:
+                self.after(0, lambda n=n: self.diarization_engine.remove_network_participant(n))
         elif t == "members":
             members = data["members"]
             self.after(0, lambda m=members: self._update_members(m))
@@ -1230,8 +1621,10 @@ class VideoCallApp(ctk.CTk):
                 self.audio_engine.receive_chunk(name, chunk)
                 self.after(0, lambda n=name: self._set_speaking(n, True))
                 self.after(400, lambda n=name: self._set_speaking(n, False))
-                # Horodatage prise de parole [F-02]
                 self.recording_engine.log_intervention(name, "Prise de parole")
+                # [F-04] Signaler que ce participant parle (mode réseau)
+                if self.diarization_engine:
+                    self.diarization_engine.feed_network_speaker(name)
         elif t == "chat":
             line = (f"[{data.get('time', '')}] "
                     f"{data.get('name', '?')} : {data.get('text', '')}")
@@ -1278,6 +1671,13 @@ class VideoCallApp(ctk.CTk):
             self.transcription_engine = None
             self.trans_toggle_btn.configure(text="▶ Activer", fg_color="#1a4a6a")
             self.trans_status_lbl.configure(text="⬤ Inactif", text_color="#444")
+        # Arrêt automatique de la diarisation [F-04]
+        self._stop_diarization()
+        # Vider les badges speakers
+        for badge in list(self._speaker_badges.values()):
+            badge.destroy()
+        self._speaker_badges.clear()
+        self.spk_count_lbl.configure(text="0 speaker(s)")
         if self.ws and self.loop:
             asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         for tile in list(self.tiles.values()):

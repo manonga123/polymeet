@@ -69,16 +69,19 @@ class TranscriptionEngine:
             Appelé dans le thread de transcription (pas le thread UI).
             Utiliser root.after(0, ...) dans le callback si mise à jour UI.
         """
-        self.on_segment  = on_segment
-        self._model      = None
-        self._error      = ""           # message d'erreur du dernier start()
-        self._queue      = queue.Queue(maxsize=MAX_QUEUE_SIZE)
-        self._buffer     = bytearray()
-        self._lock       = threading.Lock()
-        self._running    = False
-        self._thread     = None
-        self._full_text  = []       # historique complet de la session
-        self._last_lang  = "?"
+        self.on_segment             = on_segment
+        self._model                 = None
+        self._error                 = ""
+        self._queue                 = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+        self._buffer                = bytearray()
+        self._lock                  = threading.Lock()
+        self._running               = False
+        self._thread                = None
+        self._full_text             = []
+        self._last_lang             = "?"
+        # Speaker courant (mis à jour par DiarizationEngine)
+        self._current_speaker_label = "?"
+        self._current_speaker_color = "#aaaaaa"
 
     # ── Cycle de vie ────────────────────────────────────────────────────────
 
@@ -237,15 +240,24 @@ class TranscriptionEngine:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
 
             # Stocker dans l'historique
+            # Stocker dans l'historique (avec speaker)
             self._full_text.append({
-                "time": ts,
-                "lang": lang,
-                "text": text
+                "time":          ts,
+                "lang":          lang,
+                "text":          text,
+                "speaker_label": self._current_speaker_label,
+                "speaker_color": self._current_speaker_color,
             })
 
             # Callback vers l'UI
             if self.on_segment:
-                self.on_segment(text=text, language=lang, timestamp=ts)
+                self.on_segment(
+                    text=text,
+                    language=lang,
+                    timestamp=ts,
+                    speaker_label=self._current_speaker_label,
+                    speaker_color=self._current_speaker_color,
+                )
 
         except Exception as e:
             print(f"[Transcription] ❌ Erreur Whisper : {e}")
@@ -262,11 +274,19 @@ class TranscriptionEngine:
         except Exception:
             return False
 
+    def set_current_speaker(self, label: str, color: str):
+        """Mis à jour par DiarizationEngine quand le speaker courant change."""
+        self._current_speaker_label = label
+        self._current_speaker_color = color
+
     def get_full_transcript(self) -> str:
-        """Retourne la transcription complète de la session (pour export)."""
+        """Retourne la transcription complète avec noms des speakers."""
         lines = []
         for entry in self._full_text:
-            lines.append(f"[{entry['time']}] ({entry['lang'].upper()})  {entry['text']}")
+            speaker = entry.get("speaker_label", "?")
+            lines.append(
+                f"[{entry['time']}] ({entry['lang'].upper()})  "
+                f"{speaker}: {entry['text']}")
         return "\n".join(lines)
 
     def clear_transcript(self):

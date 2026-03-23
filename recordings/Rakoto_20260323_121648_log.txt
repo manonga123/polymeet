@@ -1,0 +1,7 @@
+PolyMeet — Journal d'horodatage
+Session : Rakoto_20260323_121648
+Date    : 23/03/2026
+──────────────────────────────────────────────────
+
+[12:16:48] (+00:00)  SYSTEM: Enregistrement démarré
+[12:20:22] (+03:33)  SYSTEM: Enregistrement arrêté — durée : 03:33

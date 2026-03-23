@@ -1,0 +1,8 @@
+PolyMeet — Journal d'horodatage
+Session : Avotra_20260320_201737
+Date    : 20/03/2026
+──────────────────────────────────────────────────
+
+[20:17:37] (+00:00)  SYSTEM: Enregistrement démarré
+[20:18:06] (+00:29)  SYSTEM: Enregistrement mis en pause
+[20:18:40] (+00:00)  SYSTEM: Enregistrement arrêté — durée : 00:00

@@ -1,1 +1,14 @@
 pip install customtkinter opencv-python websockets numpy pillow pyaudio
+
+
+pip install pydub
+pip install openai-whisper
+# + ffmpeg sur le système (Windows : winget install ffmpeg)
+
+ffmpeg -version
+dir "C:\Users\$env:USERNAME\AppData\Local\Microsoft\WinGet\Packages\" -Recurse -Filter "ffmpeg.exe" 2>$null
+$ffmpegPath = "C:\CHEMIN\VERS\ffmpeg\bin"   # remplace par le vrai chemin
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$ffmpegPath", "User")
+$env:Path += ";C:\Users\Avotra Fanomezantsoa\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin"
+
+pip install pyannote.audio torch torchaudio deep-translator langdetect anthropic python-docx reportlab docx2pdf sqlalchemy

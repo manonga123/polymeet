@@ -22,9 +22,9 @@ pip install -r requirements.txt
 
 lancement de reunion 
 
-
 sudo modprobe snd_aloop
+sudo modprobe v4l2loopback
+ls /dev/video*
 
-droidcam-cli 192.168.0.45 4747
 
-
+droidcam-cli 192.168.43.90 4747

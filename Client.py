@@ -1,5 +1,5 @@
 """
-client.py  –  Client de salle vidéo + audio partagée
+Client.py  –  Client de salle vidéo + audio partagée
 ─────────────────────────────────────────────────────
   [F-02] Contrôle de l'Enregistrement :
   • Boutons Start / Pause / Reprendre / Arrêter

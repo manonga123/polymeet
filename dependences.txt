@@ -10,5 +10,5 @@ dir "C:\Users\$env:USERNAME\AppData\Local\Microsoft\WinGet\Packages\" -Recurse -
 $ffmpegPath = "C:\CHEMIN\VERS\ffmpeg\bin"   # remplace par le vrai chemin
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$ffmpegPath", "User")
 $env:Path += ";C:\Users\Avotra Fanomezantsoa\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin"
-
+python -c "import whisper; whisper.load_model('small')"
 pip install pyannote.audio torch torchaudio deep-translator langdetect anthropic python-docx reportlab docx2pdf sqlalchemy

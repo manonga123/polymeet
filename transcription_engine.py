@@ -19,6 +19,7 @@ Installation :
 import threading
 import queue
 import time
+import os
 import numpy as np
 import io
 import wave
@@ -70,6 +71,7 @@ class TranscriptionEngine:
         """
         self.on_segment  = on_segment
         self._model      = None
+        self._error      = ""           # message d'erreur du dernier start()
         self._queue      = queue.Queue(maxsize=MAX_QUEUE_SIZE)
         self._buffer     = bytearray()
         self._lock       = threading.Lock()
@@ -80,20 +82,62 @@ class TranscriptionEngine:
 
     # ── Cycle de vie ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def is_model_cached() -> bool:
+        """
+        Vérifie si le modèle Whisper est déjà téléchargé en local.
+        Retourne True  → chargement offline possible.
+        Retourne False → internet requis pour le 1er téléchargement.
+        """
+        if not WHISPER_AVAILABLE:
+            return False
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+        model_file = os.path.join(cache_dir, f"{WHISPER_MODEL}.pt")
+        return os.path.isfile(model_file)
+
+    @staticmethod
+    def get_cache_path() -> str:
+        """Retourne le chemin attendu du fichier modèle en cache."""
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+        return os.path.join(cache_dir, f"{WHISPER_MODEL}.pt")
+
     def start(self):
-        """Charge le modèle Whisper et démarre le thread de transcription."""
+        """
+        Charge le modèle Whisper et démarre le thread de transcription.
+
+        Si le modèle n'est pas en cache et qu'internet est absent,
+        retourne False avec un message explicite.
+        """
         if not WHISPER_AVAILABLE:
             print("[Transcription] ❌ Impossible de démarrer : whisper absent.")
+            print("                   → pip install openai-whisper")
             return False
         if self._running:
             return True
 
-        print(f"[Transcription] ⏳ Chargement du modèle Whisper '{WHISPER_MODEL}'…")
+        cached = self.is_model_cached()
+        if cached:
+            print(f"[Transcription] ✅ Modèle '{WHISPER_MODEL}' trouvé en cache — chargement offline.")
+        else:
+            print(f"[Transcription] ⚠  Modèle '{WHISPER_MODEL}' absent du cache.")
+            print(f"                   Tentative de téléchargement (~460 MB)…")
+            print(f"                   Cache attendu : {self.get_cache_path()}")
+
+        print(f"[Transcription] ⏳ Chargement du modèle '{WHISPER_MODEL}'…")
         try:
             self._model = whisper.load_model(WHISPER_MODEL)
-            print(f"[Transcription] ✅ Modèle '{WHISPER_MODEL}' chargé.")
+            print(f"[Transcription] ✅ Modèle '{WHISPER_MODEL}' chargé avec succès.")
         except Exception as e:
-            print(f"[Transcription] ❌ Erreur chargement modèle : {e}")
+            err = str(e)
+            if any(kw in err.lower() for kw in ("connection", "network", "timeout",
+                                                  "urlopen", "ssl", "certificate")):
+                print(f"[Transcription] ❌ Erreur réseau — modèle non téléchargé.")
+                print(f"                   Connectez-vous à internet pour le 1er téléchargement.")
+                print(f"                   Une fois téléchargé, fonctionne 100% offline.")
+                self._error = "no_internet"
+            else:
+                print(f"[Transcription] ❌ Erreur chargement modèle : {e}")
+                self._error = str(e)
             return False
 
         self._running = True

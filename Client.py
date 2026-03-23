@@ -739,6 +739,21 @@ class VideoCallApp(ctk.CTk):
             return
 
         if self.transcription_engine is None:
+            # Vérifier si le modèle est en cache avant de lancer
+            engine_check = TranscriptionEngine()
+            if not engine_check.is_model_cached():
+                model_name = "small"
+                reponse = msgbox.askyesno(
+                    "Téléchargement requis",
+                    f"Le modèle Whisper '{model_name}' n'est pas encore téléchargé.\n\n"
+                    f"• Taille : ~460 MB\n"
+                    f"• Internet requis une seule fois\n"
+                    f"• Ensuite : 100% offline ✅\n\n"
+                    f"Cache : {engine_check.get_cache_path()}\n\n"
+                    f"Lancer le téléchargement maintenant ?")
+                if not reponse:
+                    return
+
             # Démarrer
             self.trans_toggle_btn.configure(text="⏳ Chargement…", state="disabled")
             self.trans_status_lbl.configure(text="⬤ Chargement…", text_color="#e0a030")
@@ -752,17 +767,32 @@ class VideoCallApp(ctk.CTk):
                     fg_color="#6a1a1a", hover_color="#541414")
                 self.trans_status_lbl.configure(
                     text="⬤ Actif", text_color="#4caf50")
-                # Effacer le placeholder
                 self.trans_box.delete("1.0", "end")
                 self.trans_box.configure(text_color="white")
                 self._add_chat_line("📝 Transcription activée (Whisper small)")
             else:
+                # Récupérer le type d'erreur
+                err = getattr(self.transcription_engine, "_error", "")
                 self.transcription_engine = None
                 self.trans_toggle_btn.configure(
                     text="▶ Activer", state="normal",
                     fg_color="#1a4a6a", hover_color="#143a54")
                 self.trans_status_lbl.configure(
                     text="⬤ Erreur", text_color="#e05050")
+
+                if err == "no_internet":
+                    msgbox.showerror(
+                        "Pas de connexion internet",
+                        "Le modèle Whisper doit être téléchargé une première fois.\n\n"
+                        "✅ Connectez-vous à internet et réessayez.\n"
+                        "✅ Après le 1er téléchargement : fonctionne 100% offline.\n\n"
+                        f"Chemin du cache : {TranscriptionEngine.get_cache_path()}")
+                else:
+                    msgbox.showerror(
+                        "Erreur de chargement",
+                        f"Impossible de charger le modèle Whisper.\n\nDétail : {err}\n\n"
+                        "Vérifiez que openai-whisper est bien installé :\n"
+                        "pip install openai-whisper")
         else:
             # Arrêter
             self.transcription_engine.stop()

@@ -1,5 +1,5 @@
 """
-Server.py  –  Serveur de salle vidéo partagée
+server.py  –  Serveur de salle vidéo partagée
 Lancer UNE SEULE FOIS sur le PC "hôte" :
     python server.py
 """

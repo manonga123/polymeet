@@ -13,3 +13,8 @@ python -c "import whisper; whisper.load_model('small')"
 pip install pyannote.audio torch torchaudio deep-translator langdetect anthropic python-docx reportlab docx2pdf sqlalchemy
 pip install transformers sentencepiece torch
 python -c "import whisper; whisper.load_model('tiny')"
+
+pip install ctranslate2==4.4.0
+pip install argostranslate
+python -c "import argostranslate.translate; print('✅ OK')"
+python install_languages.py

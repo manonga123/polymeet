@@ -109,6 +109,22 @@ except ImportError:
     DIARIZATION_AVAILABLE = False
     print("[Client] diarization_engine.py introuvable — F-04 désactivé")
 
+# ── TranslationEngine [F-05/F-06] ────────────────────────────────────────────
+try:
+    from translation_engine import TranslationEngine, SUPPORTED_LANGUAGES
+    TRANSLATION_AVAILABLE = True
+except ImportError:
+    TRANSLATION_AVAILABLE = False
+    print("[Client] translation_engine.py introuvable — F-05 désactivé")
+
+# ── AnalysisEngine [F-07/F-08] ───────────────────────────────────────────────
+try:
+    from analysis_engine import AnalysisEngine, MeetingAnalysis
+    ANALYSIS_AVAILABLE = True
+except ImportError:
+    ANALYSIS_AVAILABLE = False
+    print("[Client] analysis_engine.py introuvable — F-07 désactivé")
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -615,6 +631,9 @@ class VideoCallApp(ctk.CTk):
         self.recording_engine:     RecordingEngine        = RecordingEngine()
         self.transcription_engine                         = None  # [F-03]
         self.diarization_engine                           = None  # [F-04]
+        self.translation_engine                           = None  # [F-05]
+        self.analysis_engine                              = AnalysisEngine() if ANALYSIS_AVAILABLE else None  # [F-07]
+        self._last_analysis                               = None  # dernier résultat
 
         self.tiles   = {}
         self.my_tile = None
@@ -858,6 +877,94 @@ class VideoCallApp(ctk.CTk):
             command=self._clear_transcript).pack(side="left")
 
         # ══════════════════════════════════════════════════════════════════
+        # [F-05/F-06] Sous-panneau Traduction
+        # ══════════════════════════════════════════════════════════════════
+        trans_divider = ctk.CTkFrame(
+            self.trans_frame, height=1, fg_color="#1e2d45")
+        trans_divider.pack(fill="x", padx=8, pady=(4, 4))
+
+        trad_header = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
+        trad_header.pack(fill="x", padx=8, pady=(2, 2))
+
+        ctk.CTkLabel(trad_header, text="🌍 Traduction",
+                     font=("Arial", 10, "bold"),
+                     text_color="#4a9abf").pack(side="left")
+
+        self.trad_status_lbl = ctk.CTkLabel(
+            trad_header, text="⬤ Inactif",
+            font=("Arial", 9), text_color="#444")
+        self.trad_status_lbl.pack(side="right")
+
+        # Sélecteur de langue cible
+        trad_lang_row = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
+        trad_lang_row.pack(fill="x", padx=8, pady=(2, 4))
+
+        ctk.CTkLabel(trad_lang_row, text="Langue :",
+                     font=("Arial", 10), text_color="#888").pack(side="left", padx=(0,6))
+
+        # Construire les options depuis SUPPORTED_LANGUAGES si disponible
+        lang_options = []
+        if TRANSLATION_AVAILABLE:
+            for code, label, flag in SUPPORTED_LANGUAGES:
+                lang_options.append(f"{flag} {label}")
+        else:
+            lang_options = ["🇫🇷 Français", "🇬🇧 English"]
+
+        self._trad_lang_var = tk.StringVar(value="🇫🇷 Français")
+        self.trad_lang_menu = ctk.CTkOptionMenu(
+            trad_lang_row,
+            variable=self._trad_lang_var,
+            values=lang_options,
+            width=145, height=26,
+            font=("Arial", 9),
+            fg_color="#1a2a3a", button_color="#1e3248",
+            command=self._on_trad_lang_changed)
+        self.trad_lang_menu.pack(side="left", padx=(0, 6))
+
+        self.trad_toggle_btn = ctk.CTkButton(
+            trad_lang_row, text="▶ ON", width=58, height=26,
+            fg_color="#1a4a6a", hover_color="#143a54",
+            font=("Arial", 9, "bold"),
+            command=self._toggle_translation)
+        self.trad_toggle_btn.pack(side="left")
+
+        # Zone d'affichage de la traduction
+        self.trad_box = ctk.CTkTextbox(
+            self.trans_frame, font=("Arial", 11), wrap="word", height=120)
+        self.trad_box.pack(fill="x", padx=8, pady=(0, 6))
+        self.trad_box.insert("end", "La traduction apparaîtra ici…\n")
+        self.trad_box.configure(text_color="#555")
+
+        ctk.CTkButton(
+            self.trans_frame, text="🗑 Effacer traduction",
+            width=140, height=24,
+            fg_color="#2a1a1a", hover_color="#3a2020",
+            font=("Arial", 9),
+            command=self._clear_translation).pack(anchor="e", padx=8, pady=(0, 4))
+
+        # ── Bouton Analyser [F-07/F-08] ───────────────────────────────────
+        analyze_row = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
+        analyze_row.pack(fill="x", padx=8, pady=(4, 8))
+
+        ctk.CTkButton(
+            analyze_row,
+            text="🧠 Analyser la réunion",
+            width=180, height=32,
+            fg_color="#2a1a4a", hover_color="#3a2a5a",
+            font=("Arial", 10, "bold"),
+            command=self._run_analysis
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            analyze_row,
+            text="💾 Export",
+            width=70, height=32,
+            fg_color="#1a2a1a", hover_color="#2a3a2a",
+            font=("Arial", 10),
+            command=self._export_analysis
+        ).pack(side="left")
+
+        # ══════════════════════════════════════════════════════════════════
         # [F-02] Panneau d'enregistrement (bas de fenêtre)
         # ══════════════════════════════════════════════════════════════════
         self._build_recording_panel()
@@ -958,44 +1065,6 @@ class VideoCallApp(ctk.CTk):
                 fg_color="#1a4a6a", hover_color="#143a54")
             self.trans_status_lbl.configure(text="⬤ Inactif", text_color="#444")
             self._add_chat_line("📝 Transcription désactivée")
-
-    def _on_transcript_segment(self, text: str, language: str, timestamp: str,
-                               speaker_label: str = "?", speaker_color: str = "#aaa"):
-        """
-        Callback appelé par TranscriptionEngine (thread Whisper).
-        On repasse dans le thread UI via after().
-        """
-        def _update():
-            lang_names = {
-                "fr": "Français 🇫🇷", "en": "English 🇬🇧",
-                "mg": "Malagasy 🇲🇬", "ar": "Arabe 🇸🇦",
-                "es": "Espagnol 🇪🇸", "de": "Allemand 🇩🇪",
-                "zh": "Chinois 🇨🇳", "pt": "Portugais 🇵🇹",
-                "it": "Italien 🇮🇹",
-            }
-            lang_display = lang_names.get(language, language.upper())
-            self.trans_lang_lbl.configure(text=lang_display)
-
-            # Affichage avec nom du speaker coloré via tag
-            tag = f"spk_{speaker_label.replace(' ', '_')}"
-            try:
-                self.trans_box._textbox.tag_configure(
-                    tag, foreground=speaker_color)
-            except Exception:
-                pass
-
-            self.trans_box.configure(state="normal")
-            self.trans_box._textbox.insert("end", f"[{timestamp}] ", "timestamp")
-            self.trans_box._textbox.insert("end", f"{speaker_label}: ", tag)
-            self.trans_box._textbox.insert("end", f"{text}\n")
-            self.trans_box._textbox.tag_configure("timestamp", foreground="#555")
-            self.trans_box.see("end")
-
-            # Notif sur l'onglet si l'utilisateur est sur chat
-            if self._active_tab.get() == "chat":
-                self.tab_trans_btn.configure(text="📝 Transcription ●")
-
-        self.after(0, _update)
 
     def _on_record_chunk_and_transcribe(self, raw_bytes: bytes):
         """
@@ -1203,9 +1272,269 @@ class VideoCallApp(ctk.CTk):
                 self.transcription_engine.clear_transcript()
             self.trans_lang_lbl.configure(text="—")
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # [F-05/F-06] Traduction Multilingue
+    # ──────────────────────────────────────────────────────────────────────────
 
+    def _get_target_lang_code(self) -> str:
+        """Retourne le code ISO de la langue cible sélectionnée."""
+        if not TRANSLATION_AVAILABLE:
+            return "fr"
+        label = self._trad_lang_var.get()
+        for code, name, flag in SUPPORTED_LANGUAGES:
+            if name in label or flag in label:
+                return code
+        return "fr"
+
+    def _on_trad_lang_changed(self, choice: str):
+        """Appelé quand l'utilisateur change la langue cible."""
+        lang_code = self._get_target_lang_code()
+        if self.translation_engine:
+            self.trad_status_lbl.configure(
+                text="⬤ Chargement…", text_color="#e0a030")
+            self.translation_engine.set_target_language(lang_code)
+        print(f"[Translation] Langue cible changée → {lang_code}")
+
+    def _toggle_translation(self):
+        """Active ou désactive la traduction."""
+        if not TRANSLATION_AVAILABLE:
+            msgbox.showerror("Module manquant",
+                             "translation_engine.py introuvable.\n"
+                             "pip install argos-translate")
+            return
+
+        if self.translation_engine is None:
+            lang_code = self._get_target_lang_code()
+            self.trad_toggle_btn.configure(text="⏳", state="disabled")
+            self.trad_status_lbl.configure(
+                text="⬤ Démarrage…", text_color="#e0a030")
+
+            self.translation_engine = TranslationEngine(
+                on_translated=self._on_translated,
+                on_pack_ready=self._on_translation_pack_ready)
+            ok = self.translation_engine.start(target_lang=lang_code)
+            if ok:
+                self.trad_box.delete("1.0", "end")
+                self.trad_box.configure(text_color="white")
+                self._add_chat_line(f"🌍 Traduction activée → {lang_code.upper()}")
+            else:
+                self.translation_engine = None
+                self.trad_toggle_btn.configure(
+                    text="▶ ON", state="normal",
+                    fg_color="#1a4a6a", hover_color="#143a54")
+                self.trad_status_lbl.configure(text="⬤ Erreur", text_color="#e05050")
+                msgbox.showerror("Erreur",
+                                 "Impossible de démarrer la traduction.\n"
+                                 "Vérifiez : pip install argos-translate")
+        else:
+            self.translation_engine.stop()
+            self.translation_engine = None
+            self.trad_toggle_btn.configure(
+                text="▶ ON", state="normal",
+                fg_color="#1a4a6a", hover_color="#143a54")
+            self.trad_status_lbl.configure(text="⬤ Inactif", text_color="#444")
+            self._add_chat_line("🌍 Traduction désactivée")
+
+    def _on_translation_pack_ready(self, lang_code: str):
+        """Callback quand le pack de langue est prêt (thread loader → UI)."""
+        def _update():
+            lang_names = {code: f"{flag} {name}"
+                          for code, name, flag in SUPPORTED_LANGUAGES}
+            label = lang_names.get(lang_code, lang_code.upper())
+            self.trad_status_lbl.configure(
+                text=f"⬤ Actif ({label})", text_color="#4caf50")
+            self.trad_toggle_btn.configure(
+                text="⏹ OFF", state="normal",
+                fg_color="#6a1a1a", hover_color="#541414")
+            if lang_code == "mg":
+                self.trad_box.insert("end",
+                    "ℹ Malagasy : texte original affiché (traduction non disponible offline)\n")
+        self.after(0, _update)
+
+    def _on_translated(self, original: str, translated: str,
+                       source_lang: str, target_lang: str):
+        """
+        Callback appelé par TranslationEngine quand une traduction est prête.
+        Thread translation → thread UI via after().
+        """
+        def _update():
+            # Afficher dans la zone de traduction
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            line = f"[{ts}] {translated}\n"
+
+            self.trad_box.configure(state="normal")
+            self.trad_box.insert("end", line)
+            self.trad_box.see("end")
+
+            # Notif onglet si on est sur Chat
+            if self._active_tab.get() == "chat":
+                self.tab_trans_btn.configure(text="📝 Transcription ●")
+        self.after(0, _update)
+
+    def _clear_translation(self):
+        """Efface la zone de traduction."""
+        self.trad_box.delete("1.0", "end")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # [F-07/F-08] Analyse IA & Résumé Intelligent
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _run_analysis(self):
+        """Lance l'analyse de la transcription courante."""
+        if not ANALYSIS_AVAILABLE:
+            msgbox.showerror("Module manquant",
+                             "analysis_engine.py introuvable.")
+            return
+
+        # Récupérer la transcription
+        transcript = ""
+        if self.transcription_engine:
+            transcript = self.transcription_engine.get_full_transcript()
+        if not transcript:
+            transcript = self.trans_box.get("1.0", "end").strip()
+
+        if not transcript or len(transcript) < 20:
+            msgbox.showwarning("Transcription vide",
+                               "Il faut d'abord transcrire la réunion.\n"
+                               "Activez la transcription et parlez quelques minutes.")
+            return
+
+        # Récupérer les speakers
+        speakers = list(self.tiles.keys()) if self.tiles else []
+
+        # Lancer l'analyse dans un thread (non-bloquant)
+        self.trans_box.configure(state="normal")
+        self.trans_box.insert("end", "\n⏳ Analyse en cours…\n")
+        self.trans_box.see("end")
+
+        def _do_analysis():
+            analysis = self.analysis_engine.analyze(transcript, speakers=speakers)
+            self._last_analysis = analysis
+            self.after(0, lambda: self._show_analysis_result(analysis))
+
+        threading.Thread(target=_do_analysis, daemon=True).start()
+
+    def _show_analysis_result(self, analysis):
+        """Affiche le résultat de l'analyse dans l'UI."""
+        # Ouvrir une fenêtre de résultat dédiée
+        win = tk.Toplevel(self)
+        win.title("🧠 Analyse de la réunion — PolyMeet")
+        win.geometry("720x600")
+        win.configure(bg="#0d1117")
+
+        # Onglets dans la fenêtre
+        tab_bar = ctk.CTkFrame(win, fg_color="#161b22", height=40, corner_radius=0)
+        tab_bar.pack(fill="x", side="top")
+        tab_bar.pack_propagate(False)
+
+        content = ctk.CTkFrame(win, fg_color="#0d1117", corner_radius=0)
+        content.pack(fill="both", expand=True)
+
+        text_area = ctk.CTkTextbox(content, font=("Courier", 10), wrap="word")
+        text_area.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # Afficher le rapport formaté
+        report = self.analysis_engine.format_analysis_report(analysis)
+        text_area.insert("end", report)
+        text_area.configure(state="disabled")
+
+        # Bouton copier
+        btn_row = ctk.CTkFrame(win, fg_color="#161b22", height=44, corner_radius=0)
+        btn_row.pack(fill="x", side="bottom")
+        btn_row.pack_propagate(False)
+
+        def _copy():
+            win.clipboard_clear()
+            win.clipboard_append(report)
+            msgbox.showinfo("Copié", "Rapport copié dans le presse-papiers !")
+
+        ctk.CTkButton(btn_row, text="📋 Copier le rapport",
+                      width=160, height=30, command=_copy).pack(
+            side="left", padx=10, pady=7)
+
+        ctk.CTkButton(btn_row, text="💾 Exporter .txt",
+                      width=140, height=30,
+                      fg_color="#2a3a2a", hover_color="#1e2e1e",
+                      command=lambda: self._export_analysis(report)).pack(
+            side="left", padx=4, pady=7)
+
+        ctk.CTkButton(btn_row, text="✕ Fermer",
+                      width=80, height=30,
+                      fg_color="#3a2020", hover_color="#2e1818",
+                      command=win.destroy).pack(side="right", padx=10, pady=7)
+
+        # Notifier dans le chat
+        self._add_chat_line(
+            f"🧠 Analyse terminée — "
+            f"{len(analysis.decisions)} décision(s), "
+            f"{len(analysis.tasks)} tâche(s), "
+            f"sentiment : {analysis.sentiment}")
+
+    def _export_analysis(self, report: str = ""):
+        """Exporte le rapport d'analyse en fichier .txt"""
+        if not report and self._last_analysis:
+            report = self.analysis_engine.format_analysis_report(
+                self._last_analysis)
+        if not report:
+            msgbox.showwarning("Aucune analyse",
+                               "Lancez d'abord une analyse avec 🧠 Analyser.")
+            return
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(RECORDINGS_DIR, f"analyse_{ts}.txt")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(report)
+            msgbox.showinfo("Export réussi",
+                            f"Rapport exporté :\n{path}")
+            self._add_chat_line(
+                f"💾 Analyse exportée → {os.path.basename(path)}")
+        except Exception as e:
+            msgbox.showerror("Erreur", f"Export impossible : {e}")
+
+    def _on_transcript_segment(self, text: str, language: str, timestamp: str,
+                               speaker_label: str = "?", speaker_color: str = "#aaa"):
+        """
+        Callback appelé par TranscriptionEngine.
+        Affiche le segment ET le traduit si la traduction est active.
+        """
+        def _update():
+            lang_names = {
+                "fr": "Français 🇫🇷", "en": "English 🇬🇧",
+                "mg": "Malagasy 🇲🇬", "ar": "Arabe 🇸🇦",
+                "es": "Espagnol 🇪🇸", "de": "Allemand 🇩🇪",
+                "zh": "Chinois 🇨🇳", "pt": "Portugais 🇵🇹",
+                "it": "Italien 🇮🇹",
+            }
+            lang_display = lang_names.get(language, language.upper())
+            self.trans_lang_lbl.configure(text=lang_display)
+
+            # Affichage avec couleur speaker
+            tag = f"spk_{speaker_label.replace(' ', '_')}"
+            try:
+                self.trans_box._textbox.tag_configure(tag, foreground=speaker_color)
+            except Exception:
+                pass
+
+            self.trans_box.configure(state="normal")
+            self.trans_box._textbox.insert("end", f"[{timestamp}] ", "timestamp")
+            self.trans_box._textbox.insert("end", f"{speaker_label}: ", tag)
+            self.trans_box._textbox.insert("end", f"{text}\n")
+            self.trans_box._textbox.tag_configure("timestamp", foreground="#555")
+            self.trans_box.see("end")
+
+            if self._active_tab.get() == "chat":
+                self.tab_trans_btn.configure(text="📝 Transcription ●")
+
+            # ── Envoyer à la traduction si active ────────────────────────
+            if (self.translation_engine and
+                    self.translation_engine.is_ready and
+                    language != self.translation_engine.target_language):
+                self.translation_engine.translate(text, source_lang=language)
+
+        self.after(0, _update)
 
     def _build_recording_panel(self):
+
         """Construit le panneau F-02 Contrôle de l'Enregistrement."""
 
         rec_panel = ctk.CTkFrame(
@@ -1678,6 +2007,13 @@ class VideoCallApp(ctk.CTk):
             badge.destroy()
         self._speaker_badges.clear()
         self.spk_count_lbl.configure(text="0 speaker(s)")
+        # Arrêt automatique de la traduction [F-05]
+        if self.translation_engine is not None:
+            self.translation_engine.stop()
+            self.translation_engine = None
+            self.trad_toggle_btn.configure(text="▶ ON", fg_color="#1a4a6a")
+            self.trad_status_lbl.configure(text="⬤ Inactif", text_color="#444")
+
         if self.ws and self.loop:
             asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         for tile in list(self.tiles.values()):
@@ -1785,143 +2121,3 @@ if __name__ == "__main__":
     app = VideoCallApp()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
-
-
-
-
-
-
-
-"""
-server.py  –  Serveur de salle vidéo partagée
-Lancer UNE SEULE FOIS sur le PC "hôte" :
-    python server.py
-"""
-import asyncio
-import websockets
-import json
-import time
-from collections import defaultdict
-
-HOST = "0.0.0.0"
-PORT = 9765
-
-clients = {}
-rooms   = defaultdict(set)
-
-
-def is_open(ws):
-    try:
-        return ws.open
-    except AttributeError:
-        return ws.state.name == "OPEN"
-
-
-async def broadcast(room, message, exclude=None):
-    targets = [ws for ws in rooms[room] if ws != exclude and is_open(ws)]
-    if targets:
-        await asyncio.gather(*[ws.send(message) for ws in targets],
-                             return_exceptions=True)
-
-
-async def broadcast_members(room):
-    members = [clients[ws]["name"] for ws in rooms[room] if ws in clients]
-    msg = json.dumps({"type": "members", "members": members})
-    targets = [ws for ws in rooms[room] if is_open(ws)]
-    if targets:
-        await asyncio.gather(*[ws.send(msg) for ws in targets],
-                             return_exceptions=True)
-
-
-async def handler(ws):
-    print(f"[+] Connexion : {ws.remote_address}")
-    try:
-        async for raw in ws:
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
-
-            t = data.get("type")
-
-            if t == "join":
-                name = data.get("name", "Anonyme")[:30]
-                # FORCE tout le monde dans la même salle, peu importe ce qu'ils tapent
-                room = "Salles_Unique_Pour_Tous" 
-                
-                clients[ws] = {"name": name, "room": room}
-                rooms[room].add(ws)
-                print(f"  [GLOBAL] {name} rejoint (Total: {len(rooms[room])} membres)")
-                
-                await ws.send(json.dumps({
-                    "type": "joined", "name": name,
-                    "room": "Polymeet", "count": len(rooms[room])
-                }))
-                await broadcast(room, json.dumps(
-                    {"type": "user_joined", "name": name}), exclude=ws)
-                await broadcast_members(room)
-
-
-            elif t == "video":
-                if ws in clients:
-                    room = clients[ws]["room"]
-                    name = clients[ws]["name"]
-                    await broadcast(room, json.dumps({
-                        "type": "video", "name": name,
-                        "frame": data.get("frame", "")
-                    }), exclude=ws)
-
-            elif t == "audio":
-                if ws in clients:
-                    room = clients[ws]["room"]
-                    name = clients[ws]["name"]
-                    await broadcast(room, json.dumps({
-                        "type": "audio", "name": name,
-                        "chunk": data.get("chunk", "")
-                    }), exclude=ws)
-
-            elif t == "chat":
-                if ws in clients:
-                    room = clients[ws]["room"]
-                    name = clients[ws]["name"]
-                    await broadcast(room, json.dumps({
-                        "type": "chat", "name": name,
-                        "text": data.get("text", "")[:500],
-                        "time": time.strftime("%H:%M")
-                    }))
-
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        if ws in clients:
-            info = clients.pop(ws)
-            room = info["room"]
-            rooms[room].discard(ws)
-            print(f"  [{room}] {info['name']} quitté ({len(rooms[room])} restants)")
-            await broadcast(room, json.dumps(
-                {"type": "user_left", "name": info["name"]}))
-            await broadcast_members(room)
-            if not rooms[room]:
-                del rooms[room]
-
-
-async def main():
-    import socket
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        ip = "127.0.0.1"
-
-    print("╔══════════════════════════════════════════╗")
-    print(f"║  Serveur vidéo  –  port {PORT}             ║")
-    print("║  En attente de connexions…               ║")
-    print("╚══════════════════════════════════════════╝")
-    print(f"\n  ✅ IP locale  : {ip}")
-    print(f"  📋 Donnez cette IP aux participants : {ip}\n")
-
-    async with websockets.serve(handler, HOST, PORT, max_size=10_000_000):
-        await asyncio.Future()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

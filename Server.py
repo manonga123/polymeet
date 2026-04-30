@@ -119,7 +119,7 @@ async def main():
         ip = "127.0.0.1"
 
     print("╔══════════════════════════════════════════╗")
-    print(f"║  Serveur vidéo  –  port {PORT}             ║")
+    print(f"║  Serveur vidéo  –  port {PORT}          ║")
     print("║  En attente de connexions…               ║")
     print("╚══════════════════════════════════════════╝")
     print(f"\n  ✅ IP locale  : {ip}")

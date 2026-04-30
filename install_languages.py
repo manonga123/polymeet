@@ -1,70 +1,127 @@
 """
-install_languages.py — Pré-installation des packs de langue argos-translate
-Lancer UNE SEULE FOIS avec internet :
-    python install_languages.py
+install_languages.py — Installation de TOUTES les paires de traduction
+───────────────────────────────────────────────────────────────────────
+9 langues × 8 directions = 72 paires
+Langues : fr, en, ar, es, de, zh, pt, it, mg (Malagasy)
 
-Après ça : traduction 100% offline ✅
+Usage :
+    python install_languages.py
 """
-import argostranslate.package
+
+import argostranslate.package as pkg
 import argostranslate.translate
 
-# Langues à installer (paires depuis/vers anglais comme pivot)
-# Format : (from_code, to_code)
-PAIRS_TO_INSTALL = [
-    ("en", "fr"),   # Anglais → Français
-    ("fr", "en"),   # Français → Anglais
-    ("en", "ar"),   # Anglais → Arabe
-    ("en", "es"),   # Anglais → Espagnol
-    ("en", "de"),   # Anglais → Allemand
-    ("en", "zh"),   # Anglais → Chinois
-    ("en", "pt"),   # Anglais → Portugais
-    ("en", "it"),   # Anglais → Italien
-    ("ar", "en"),
-    ("es", "en"),
-    ("de", "en"),
-    ("zh", "en"),
-    ("pt", "en"),
-    ("it", "en"),
-]
+LANGUAGES = ["en", "fr", "ar", "es", "de", "zh", "pt", "it", "mg"]
+
+LANGUAGE_NAMES = {
+    "en": "Anglais",
+    "fr": "Français",
+    "ar": "Arabe",
+    "es": "Espagnol",
+    "de": "Allemand",
+    "zh": "Chinois",
+    "pt": "Portugais",
+    "it": "Italien",
+    "mg": "Malagasy",
+}
+
+def build_all_pairs():
+    """Génère toutes les paires src → tgt (72 paires)."""
+    return [
+        (src, tgt)
+        for src in LANGUAGES
+        for tgt in LANGUAGES
+        if src != tgt
+    ]
+
+def get_already_installed() -> set:
+    """Retourne l'ensemble des paires déjà installées."""
+    installed_set = set()
+    try:
+        installed_langs = argostranslate.translate.get_installed_languages()
+        for src_lang in installed_langs:
+            for tgt_lang in installed_langs:
+                if src_lang.code != tgt_lang.code:
+                    if src_lang.get_translation(tgt_lang):
+                        installed_set.add((src_lang.code, tgt_lang.code))
+    except Exception as e:
+        print(f"  ⚠️  Erreur vérification packs installés : {e}")
+    return installed_set
 
 def install_all():
-    print("🔄 Mise à jour de l'index des paquets…")
-    argostranslate.package.update_package_index()
-    available = argostranslate.package.get_available_packages()
-    installed = argostranslate.translate.get_installed_languages()
-    installed_codes = {l.code for l in installed}
+    print("=" * 55)
+    print("  PolyMeet — Installation des packs de traduction")
+    print("  9 langues × 8 directions = 72 paires")
+    print("=" * 55)
 
-    for from_code, to_code in PAIRS_TO_INSTALL:
-        # Vérifier si déjà installé
-        from_lang = next((l for l in installed if l.code == from_code), None)
-        to_lang   = next((l for l in installed if l.code == to_code), None)
-        if from_lang and to_lang and from_lang.get_translation(to_lang):
-            print(f"  ✅ {from_code} → {to_code} déjà installé")
+    print("\n🔄 Mise à jour de l'index des paquets…")
+    try:
+        pkg.update_package_index()
+        print("  ✅ Index mis à jour.\n")
+    except Exception as e:
+        print(f"  ⚠️  Impossible de mettre à jour l'index : {e}")
+        print("  → Vérifiez votre connexion internet.\n")
+
+    available  = pkg.get_available_packages()
+    pairs      = build_all_pairs()
+    already    = get_already_installed()
+
+    print(f"📋 {len(pairs)} paires à vérifier\n")
+
+    success, skipped, failed, unavailable = 0, 0, 0, 0
+
+    for src, tgt in pairs:
+        src_name = LANGUAGE_NAMES[src]
+        tgt_name = LANGUAGE_NAMES[tgt]
+
+        # Déjà installé ?
+        if (src, tgt) in already:
+            print(f"  ✔️  {src_name} → {tgt_name} : déjà installé")
+            skipped += 1
             continue
 
-        # Trouver le paquet
-        pkg = next((p for p in available
-                    if p.from_code == from_code and p.to_code == to_code), None)
-        if pkg:
-            print(f"  📦 Installation {from_code} → {to_code}…")
-            try:
-                argostranslate.package.install_from_path(pkg.download())
-                print(f"  ✅ {from_code} → {to_code} installé !")
-            except Exception as e:
-                print(f"  ❌ {from_code} → {to_code} échoué : {e}")
-        else:
-            print(f"  ⚠  {from_code} → {to_code} non disponible")
+        # Chercher dans l'index
+        match = next(
+            (p for p in available if p.from_code == src and p.to_code == tgt),
+            None
+        )
 
-    print("\n✅ Installation terminée !")
-    print("Vous pouvez maintenant utiliser la traduction offline.\n")
+        if match is None:
+            print(f"  ⚠️  {src_name} → {tgt_name} : absent de l'index argostranslate")
+            unavailable += 1
+            continue
 
-    # Résumé
-    installed = argostranslate.translate.get_installed_languages()
-    print("Langues disponibles :")
-    for l in installed:
-        targets = [t.to_lang.code for t in l.translations_from]
-        if targets:
-            print(f"  {l.code} → {', '.join(targets)}")
+        print(f"  📦 Installation {src_name} → {tgt_name}…", end=" ", flush=True)
+        try:
+            pkg.install_from_path(match.download())
+            print("✅")
+            success += 1
+        except Exception as e:
+            print(f"❌ ({e})")
+            failed += 1
+
+    # ── Résumé ──────────────────────────────────────────────────────────────
+    print(f"\n{'═' * 55}")
+    print(f"  ✅ Installés      : {success}")
+    print(f"  ✔️  Déjà présents  : {skipped}")
+    print(f"  ⚠️  Non disponibles : {unavailable}")
+    print(f"  ❌ Échecs          : {failed}")
+    print(f"{'═' * 55}")
+
+    if unavailable > 0:
+        print("""
+ℹ️  Note sur les paires non disponibles :
+   Certaines paires (souvent impliquant 'mg' Malagasy)
+   peuvent être absentes de l'index argostranslate.
+   
+   → PolyMeet utilisera automatiquement un PIVOT via
+     l'anglais ou le français pour ces paires.
+   
+   Exemple : Malagasy → Arabe passera par :
+             Malagasy → Anglais → Arabe
+""")
+
+    print("\n🎉 Installation terminée ! Vous pouvez lancer PolyMeet.")
 
 if __name__ == "__main__":
     install_all()

@@ -3,23 +3,25 @@ translation_engine.py  –  Module F-05/F-06 : Traduction Multilingue Offline
 ─────────────────────────────────────────────────────────────────────────────
 Fonctionnalités :
   • Traduction 100% offline via argos-translate
-  • 9 langues : FR, EN, AR, ES, DE, ZH, PT, IT + MG (fallback)
-  • Chargement des packs de langue en arrière-plan (non-bloquant)
+  • 9 langues : FR, EN, AR, ES, DE, ZH, PT, IT, MG
+  • Traduction TOUS AZIMUTS : chaque langue → toutes les autres (72 paires)
+  • Détection automatique de la langue source (via Whisper ou langdetect)
+  • Fallback via pivot anglais si paire directe absente (ex: mg ↔ ar)
+  • Chargement des packs en arrière-plan (non-bloquant)
   • Cache des traductions récentes (évite de re-traduire la même phrase)
   • Callback vers l'UI dès qu'une traduction est prête
   • Glossaire personnalisable (termes métier non traduits)
 
 Installation :
   pip install argos-translate
-
-Les packs de langue (~100 MB chacun) se téléchargent automatiquement
-la première fois via install_language_pack().
+  python install_languages.py   ← installe les 72 paires
 """
 
 import threading
 import queue
 import time
 import os
+import re
 import json
 from functools import lru_cache
 
@@ -33,22 +35,39 @@ except ImportError:
     print("[Translation] ⚠  argos-translate non installé")
     print("               → pip install argos-translate")
 
-# ─── Langues supportées ──────────────────────────────────────────────────────
+# ─── Langues supportées (toutes les 9) ──────────────────────────────────────
 # (code_iso, label_affichage, flag)
 SUPPORTED_LANGUAGES = [
-    ("fr", "Français",   "🇫🇷"),
-    ("en", "English",    "🇬🇧"),
-    ("mg", "Malagasy",   "🇲🇬"),   # fallback : texte original si non supporté
-    ("ar", "Arabe",      "🇸🇦"),
-    ("es", "Espagnol",   "🇪🇸"),
-    ("de", "Allemand",   "🇩🇪"),
-    ("zh", "Chinois",    "🇨🇳"),
-    ("pt", "Portugais",  "🇵🇹"),
-    ("it", "Italien",    "🇮🇹"),
+    ("fr", "Français",  "🇫🇷"),
+    ("en", "English",   "🇬🇧"),
+    ("mg", "Malagasy",  "🇲🇬"),
+    ("ar", "Arabe",     "🇸🇦"),
+    ("es", "Espagnol",  "🇪🇸"),
+    ("de", "Allemand",  "🇩🇪"),
+    ("zh", "Chinois",   "🇨🇳"),
+    ("pt", "Portugais", "🇵🇹"),
+    ("it", "Italien",   "🇮🇹"),
 ]
 
-# Langues supportées par argos-translate (Malagasy absent)
-ARGOS_SUPPORTED = {"fr", "en", "ar", "es", "de", "zh", "pt", "it"}
+# Tous les codes langues
+ALL_LANG_CODES = [code for code, _, _ in SUPPORTED_LANGUAGES]
+
+# Langues avec packs argostranslate disponibles dans l'index officiel
+# (Malagasy peut être absent → fallback pivot anglais automatique)
+ARGOS_SUPPORTED = {"fr", "en", "ar", "es", "de", "zh", "pt", "it", "mg"}
+
+# Noms lisibles pour les logs
+LANG_NAMES = {
+    "fr": "Français",
+    "en": "Anglais",
+    "ar": "Arabe",
+    "es": "Espagnol",
+    "de": "Allemand",
+    "zh": "Chinois",
+    "pt": "Portugais",
+    "it": "Italien",
+    "mg": "Malagasy",
+}
 
 # Glossaire par défaut (termes qui ne doivent pas être traduits)
 DEFAULT_GLOSSARY = {
@@ -56,7 +75,7 @@ DEFAULT_GLOSSARY = {
     "DroidCam", "WebSocket", "Python",
 }
 
-# Cache des paires déjà installées : {(src, tgt): bool}
+# Cache des paires déjà vérifiées comme installées : {(src, tgt): bool}
 _installed_pairs: dict = {}
 
 # Fichier glossaire personnalisé
@@ -66,12 +85,14 @@ GLOSSARY_FILE = "glossary.json"
 class TranslationEngine:
     """
     Moteur de traduction offline argos-translate.
+    Supporte la traduction dans TOUTES les directions entre 9 langues.
 
     Usage :
         engine = TranslationEngine(on_translated=my_callback)
-        engine.set_target_language("fr")
+        engine.set_source_language("fr")   # langue détectée par Whisper
+        engine.set_target_language("en")   # langue choisie par l'utilisateur
         engine.start()
-        engine.translate("Hello world", source_lang="en")
+        engine.translate("Bonjour tout le monde", source_lang="fr")
         engine.stop()
 
     Callback :
@@ -81,15 +102,16 @@ class TranslationEngine:
     def __init__(self, on_translated=None, on_pack_ready=None):
         """
         on_translated(original, translated, source_lang, target_lang)
-        on_pack_ready(lang_code)  : appelé quand un pack est installé
+        on_pack_ready(lang_code)  : appelé quand un pack est prêt
         """
         self.on_translated  = on_translated
         self.on_pack_ready  = on_pack_ready
 
+        self._source_lang   = "auto"     # langue source (auto = détection Whisper)
         self._target_lang   = "fr"       # langue cible par défaut
         self._running       = False
         self._ready         = False
-        self._queue         = queue.Queue(maxsize=10)
+        self._queue         = queue.Queue(maxsize=20)
         self._worker_thread = None
         self._cache         = {}         # {(text, src, tgt): translated}
         self._glossary      = set(DEFAULT_GLOSSARY)
@@ -97,16 +119,20 @@ class TranslationEngine:
 
         self._load_glossary()
 
-    # ── Démarrage ────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────
+    # Démarrage / Arrêt
+    # ────────────────────────────────────────────────────────────────────────
 
-    def start(self, target_lang: str = "fr"):
+    def start(self, source_lang: str = "auto", target_lang: str = "fr"):
         """
-        Démarre le moteur. Vérifie/installe les packs nécessaires
-        en arrière-plan. L'UI ne se bloque PAS.
+        Démarre le moteur de traduction.
+        Vérifie/installe les packs nécessaires en arrière-plan.
         """
         if not ARGOS_AVAILABLE:
-            print("[Translation] ❌ argos-translate manquant")
+            print("[Translation] ❌ argos-translate manquant — pip install argos-translate")
             return False
+
+        self._source_lang = source_lang
         self._target_lang = target_lang
         self._running     = True
 
@@ -115,15 +141,17 @@ class TranslationEngine:
             target=self._worker_loop, daemon=True, name="TranslationWorker")
         self._worker_thread.start()
 
-        # Vérifier/installer le pack en arrière-plan
+        # Vérifier/installer les packs en arrière-plan
         threading.Thread(
-            target=self._ensure_pack,
-            args=(target_lang,),
+            target=self._ensure_pair_ready,
+            args=(source_lang, target_lang),
             daemon=True,
             name="PackInstaller"
         ).start()
 
-        print(f"[Translation] ▶ Démarré → cible : {target_lang}")
+        src_name = LANG_NAMES.get(source_lang, source_lang)
+        tgt_name = LANG_NAMES.get(target_lang, target_lang)
+        print(f"[Translation] ▶ Démarré : {src_name} → {tgt_name}")
         return True
 
     def stop(self):
@@ -137,61 +165,106 @@ class TranslationEngine:
             self._worker_thread.join(timeout=3)
         print("[Translation] Arrêté.")
 
-    # ── Langue cible ─────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────
+    # Gestion des langues source et cible
+    # ────────────────────────────────────────────────────────────────────────
+
+    def set_source_language(self, lang_code: str):
+        """
+        Définit la langue source (habituellement détectée par Whisper).
+        Passer "auto" pour laisser argos détecter.
+        """
+        if lang_code == self._source_lang:
+            return
+        old = self._source_lang
+        self._source_lang = lang_code
+        print(f"[Translation] Langue source : {LANG_NAMES.get(old, old)} → {LANG_NAMES.get(lang_code, lang_code)}")
+
+        # Re-vérifier les packs pour la nouvelle paire
+        if self._target_lang and lang_code != "auto":
+            self._ready = False
+            threading.Thread(
+                target=self._ensure_pair_ready,
+                args=(lang_code, self._target_lang),
+                daemon=True
+            ).start()
 
     def set_target_language(self, lang_code: str):
-        """Change la langue cible à la volée."""
+        """
+        Change la langue cible à la volée.
+        Re-vérifie/installe les packs si nécessaire.
+        """
         if lang_code == self._target_lang:
             return
+        old = self._target_lang
         self._target_lang = lang_code
         self._ready       = False
-        print(f"[Translation] Changement langue cible → {lang_code}")
+        print(f"[Translation] Langue cible : {LANG_NAMES.get(old, old)} → {LANG_NAMES.get(lang_code, lang_code)}")
 
-        if lang_code == "mg":
-            # Malagasy non supporté par argos → mode passthrough
-            self._ready = True
-            if self.on_pack_ready:
-                self.on_pack_ready("mg")
-            return
-
-        # Installer le pack si nécessaire
         threading.Thread(
-            target=self._ensure_pack,
-            args=(lang_code,),
+            target=self._ensure_pair_ready,
+            args=(self._source_lang, lang_code),
             daemon=True
         ).start()
 
-    # ── Traduction ───────────────────────────────────────────────────────────
+    def get_available_targets(self, source_lang: str) -> list:
+        """
+        Retourne la liste des langues cibles disponibles pour une source donnée.
+        Exclut la langue source elle-même.
+        """
+        return [
+            (code, name, flag)
+            for code, name, flag in SUPPORTED_LANGUAGES
+            if code != source_lang
+        ]
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Traduction publique
+    # ────────────────────────────────────────────────────────────────────────
 
     def translate(self, text: str, source_lang: str = "auto"):
         """
         Envoie une phrase à traduire (non-bloquant).
-        Le résultat arrive via on_translated().
+        Le résultat arrive via on_translated(original, translated, src, tgt).
+
+        source_lang : code ISO détecté par Whisper, ou "auto"
         """
         if not self._running:
             return
         if not text or not text.strip():
             return
 
-        # Malagasy : passthrough
-        if self._target_lang == "mg":
+        # Même langue source = cible → pas besoin de traduire
+        effective_src = source_lang if source_lang != "auto" else self._source_lang
+        if effective_src != "auto" and effective_src == self._target_lang:
             if self.on_translated:
-                self.on_translated(text, text, source_lang, "mg")
+                self.on_translated(text, text, effective_src, self._target_lang)
             return
 
-        # Même langue source = cible : pas besoin de traduire
-        if source_lang != "auto" and source_lang == self._target_lang:
-            if self.on_translated:
-                self.on_translated(text, text, source_lang, self._target_lang)
-            return
-
-        item = {"text": text, "source": source_lang, "target": self._target_lang}
+        item = {
+            "text":   text,
+            "source": source_lang,
+            "target": self._target_lang,
+        }
         try:
             self._queue.put_nowait(item)
         except queue.Full:
-            pass   # on abandonne si la queue est pleine
+            pass  # on abandonne si la queue est pleine
 
-    # ── Worker ───────────────────────────────────────────────────────────────
+    def translate_sync(self, text: str, source_lang: str, target_lang: str) -> str:
+        """
+        Traduction SYNCHRONE (bloquante) — utile pour la génération de rapport.
+        Retourne directement la chaîne traduite.
+        """
+        if not text or not text.strip():
+            return text
+        if source_lang == target_lang:
+            return text
+        return self._do_translate_core(text, source_lang, target_lang)
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Worker interne
+    # ────────────────────────────────────────────────────────────────────────
 
     def _worker_loop(self):
         while self._running:
@@ -202,185 +275,227 @@ class TranslationEngine:
             if item is None:
                 break
             if not self._ready:
-                continue   # pack pas encore prêt, on ignore
+                # Pack pas encore prêt → on remet dans la queue après un délai
+                time.sleep(0.5)
+                try:
+                    self._queue.put_nowait(item)
+                except queue.Full:
+                    pass
+                continue
 
-            self._do_translate(item["text"], item["source"], item["target"])
+            translated = self._do_translate_core(
+                item["text"], item["source"], item["target"])
 
-    def _do_translate(self, text: str, source_lang: str, target_lang: str):
-        """Effectue la traduction réelle."""
+            if self.on_translated:
+                self.on_translated(
+                    item["text"], translated,
+                    item["source"], item["target"]
+                )
 
-        # Protection glossaire : remplacer les termes par des tokens
+    def _do_translate_core(self, text: str, source_lang: str, target_lang: str) -> str:
+        """
+        Cœur de la traduction :
+        1. Protège le glossaire
+        2. Vérifie le cache
+        3. Tente la traduction directe src → tgt
+        4. Fallback : pivot via l'anglais (src → en → tgt)
+        5. Restaure le glossaire
+        """
+        if not ARGOS_AVAILABLE:
+            return text
+
+        # Normaliser "auto"
+        src = source_lang if source_lang != "auto" else self._source_lang
+        tgt = target_lang
+
+        if src == tgt or src == "auto":
+            return text
+
+        # Protection glossaire
         protected, mapping = self._protect_glossary(text)
 
         # Cache
-        cache_key = (protected, source_lang, target_lang)
+        cache_key = (protected, src, tgt)
         with self._lock:
             if cache_key in self._cache:
-                translated = self._cache[cache_key]
-                translated = self._restore_glossary(translated, mapping)
-                if self.on_translated:
-                    self.on_translated(text, translated, source_lang, target_lang)
-                return
+                return self._restore_glossary(self._cache[cache_key], mapping)
 
-        try:
-            if source_lang == "auto" or source_lang not in ARGOS_SUPPORTED:
-                # Détection automatique : essayer depuis "en" et "fr"
-                translated = self._translate_with_fallback(
-                    protected, target_lang)
-            else:
-                translated = self._translate_pair(
-                    protected, source_lang, target_lang)
+        # ── Traduction directe ──────────────────────────────────────────────
+        result = self._translate_pair(protected, src, tgt)
 
-            if not translated:
-                translated = text
+        # ── Fallback pivot anglais ──────────────────────────────────────────
+        if (not result or result == protected) and src != "en" and tgt != "en":
+            print(f"[Translation] ⚡ Pivot anglais : {src} → en → {tgt}")
+            intermediate = self._translate_pair(protected, src, "en")
+            if intermediate and intermediate != protected:
+                result = self._translate_pair(intermediate, "en", tgt)
 
-            # Restaurer le glossaire
-            translated = self._restore_glossary(translated, mapping)
+        # ── Fallback pivot français ─────────────────────────────────────────
+        if (not result or result == protected) and src != "fr" and tgt != "fr":
+            print(f"[Translation] ⚡ Pivot français : {src} → fr → {tgt}")
+            intermediate = self._translate_pair(protected, src, "fr")
+            if intermediate and intermediate != protected:
+                result = self._translate_pair(intermediate, "fr", tgt)
 
-            # Mettre en cache
-            with self._lock:
-                if len(self._cache) > 200:
-                    # Nettoyer le cache si trop grand
-                    self._cache.clear()
-                self._cache[cache_key] = translated
+        if not result:
+            result = text  # retourner l'original si tout échoue
 
-            if self.on_translated:
-                self.on_translated(text, translated, source_lang, target_lang)
+        # Restaurer glossaire
+        result = self._restore_glossary(result, mapping)
 
-        except Exception as e:
-            print(f"[Translation] ❌ Erreur : {e}")
-            if self.on_translated:
-                self.on_translated(text, text, source_lang, target_lang)
+        # Mettre en cache
+        with self._lock:
+            if len(self._cache) > 300:
+                self._cache.clear()
+            self._cache[cache_key] = result
+
+        return result
 
     def _translate_pair(self, text: str, src: str, tgt: str) -> str:
-        """Traduit directement d'une langue vers une autre."""
-        if not ARGOS_AVAILABLE:
+        """Tente une traduction directe src → tgt via argostranslate."""
+        if not ARGOS_AVAILABLE or src == tgt:
             return text
         try:
             installed = argostranslate.translate.get_installed_languages()
             src_lang  = next((l for l in installed if l.code == src), None)
             tgt_lang  = next((l for l in installed if l.code == tgt), None)
             if not src_lang or not tgt_lang:
-                return text
+                return ""
             translation = src_lang.get_translation(tgt_lang)
             if not translation:
-                return text
-            return translation.translate(text)
+                return ""
+            result = translation.translate(text)
+            return result if result else ""
         except Exception as e:
-            print(f"[Translation] ❌ pair {src}→{tgt} : {e}")
-            return text
+            print(f"[Translation] ❌ {src}→{tgt} : {e}")
+            return ""
 
-    def _translate_with_fallback(self, text: str, tgt: str) -> str:
-        """
-        Détection auto de la langue source :
-        essaie EN→tgt puis FR→tgt.
-        """
-        for src in ("en", "fr", "es", "de", "pt", "it", "ar", "zh"):
-            if src == tgt:
-                continue
-            result = self._translate_pair(text, src, tgt)
-            if result and result != text:
-                return result
-        return text
+    # ────────────────────────────────────────────────────────────────────────
+    # Installation des packs
+    # ────────────────────────────────────────────────────────────────────────
 
-    # ── Installation des packs ────────────────────────────────────────────────
-
-    def _ensure_pack(self, target_lang: str):
+    def _ensure_pair_ready(self, source_lang: str, target_lang: str):
         """
-        Vérifie si les packs nécessaires sont installés.
-        Les installe automatiquement si absent (nécessite internet 1 fois).
+        Vérifie que les packs nécessaires pour la paire (source → cible)
+        sont installés. Les installe si absent (nécessite internet 1 fois).
+        Gère le fallback : si paire directe absente, prépare les packs pivot.
         """
-        if target_lang == "mg":
-            self._ready = True
-            if self.on_pack_ready:
-                self.on_pack_ready("mg")
+        if not ARGOS_AVAILABLE:
             return
 
-        if target_lang not in ARGOS_SUPPORTED:
-            print(f"[Translation] ⚠ Langue '{target_lang}' non supportée par argos")
+        src = source_lang if source_lang != "auto" else "en"
+        tgt = target_lang
+
+        if src == tgt:
+            self._ready = True
             return
 
         try:
-            installed = argostranslate.translate.get_installed_languages()
-            installed_codes = {l.code for l in installed}
+            # Paires à vérifier : directe + pivots éventuels
+            pairs_needed = [(src, tgt)]
+            if src != "en" and tgt != "en":
+                pairs_needed += [(src, "en"), ("en", tgt)]
+            if src != "fr" and tgt != "fr":
+                pairs_needed += [(src, "fr"), ("fr", tgt)]
 
-            needs_install = []
+            # Dédoublonner
+            pairs_needed = list(dict.fromkeys(pairs_needed))
 
-            # On a besoin de EN→target et EN→EN (pivot)
-            for src in ["en", "fr"]:
-                pair_key = (src, target_lang)
-                if pair_key in _installed_pairs:
-                    continue
-                # Vérifier si déjà installé
-                src_lang = next((l for l in installed if l.code == src), None)
-                tgt_lang = next((l for l in installed if l.code == target_lang), None)
-                if src_lang and tgt_lang and src_lang.get_translation(tgt_lang):
-                    _installed_pairs[pair_key] = True
-                else:
-                    needs_install.append(pair_key)
+            missing = self._find_missing_pairs(pairs_needed)
 
-            if not needs_install:
-                print(f"[Translation] ✅ Packs disponibles pour '{target_lang}'")
+            if not missing:
+                print(f"[Translation] ✅ Packs prêts : {LANG_NAMES.get(src,src)} → {LANG_NAMES.get(tgt,tgt)}")
                 self._ready = True
                 if self.on_pack_ready:
-                    self.on_pack_ready(target_lang)
+                    self.on_pack_ready(tgt)
                 return
 
-            # Télécharger les packs manquants
-            print(f"[Translation] ⏳ Téléchargement packs pour '{target_lang}'…")
+            # Installer les packs manquants
+            print(f"[Translation] ⏳ Installation de {len(missing)} pack(s) manquant(s)…")
             argostranslate.package.update_package_index()
             available = argostranslate.package.get_available_packages()
 
-            for (src, tgt) in needs_install:
+            for (s, t) in missing:
                 pkg = next(
-                    (p for p in available
-                     if p.from_code == src and p.to_code == tgt), None)
+                    (p for p in available if p.from_code == s and p.to_code == t),
+                    None
+                )
                 if pkg:
-                    print(f"[Translation] 📦 Installation {src}→{tgt}…")
+                    print(f"[Translation] 📦 Installation {LANG_NAMES.get(s,s)} → {LANG_NAMES.get(t,t)}…")
                     argostranslate.package.install_from_path(pkg.download())
-                    _installed_pairs[(src, tgt)] = True
-                    print(f"[Translation] ✅ Pack {src}→{tgt} installé.")
+                    _installed_pairs[(s, t)] = True
+                    print(f"[Translation] ✅ Pack {s}→{t} installé.")
                 else:
-                    print(f"[Translation] ⚠ Pack {src}→{tgt} non trouvé.")
+                    print(f"[Translation] ⚠  Pack {s}→{t} absent de l'index argostranslate.")
+                    _installed_pairs[(s, t)] = False
 
             self._ready = True
             if self.on_pack_ready:
-                self.on_pack_ready(target_lang)
+                self.on_pack_ready(tgt)
 
         except Exception as e:
-            print(f"[Translation] ❌ Erreur installation pack : {e}")
-            # Si offline et pack déjà installé, on peut quand même fonctionner
-            self._ready = self._check_pack_available(target_lang)
+            print(f"[Translation] ❌ Erreur installation : {e}")
+            # Vérifier si on peut quand même fonctionner offline
+            self._ready = self._check_any_path_available(src, tgt)
             if self._ready and self.on_pack_ready:
-                self.on_pack_ready(target_lang)
+                self.on_pack_ready(tgt)
 
-    def _check_pack_available(self, target_lang: str) -> bool:
-        """Vérifie si le pack est disponible sans internet."""
+    def _find_missing_pairs(self, pairs: list) -> list:
+        """Retourne les paires de la liste qui ne sont pas encore installées."""
+        missing = []
         try:
             installed = argostranslate.translate.get_installed_languages()
-            tgt = next((l for l in installed if l.code == target_lang), None)
-            if not tgt:
-                return False
-            for l in installed:
-                if l.code != target_lang and l.get_translation(tgt):
+            for (src, tgt) in pairs:
+                if (src, tgt) in _installed_pairs:
+                    continue
+                src_lang = next((l for l in installed if l.code == src), None)
+                tgt_lang = next((l for l in installed if l.code == tgt), None)
+                if src_lang and tgt_lang and src_lang.get_translation(tgt_lang):
+                    _installed_pairs[(src, tgt)] = True
+                else:
+                    missing.append((src, tgt))
+        except Exception:
+            pass
+        return missing
+
+    def _check_any_path_available(self, src: str, tgt: str) -> bool:
+        """
+        Vérifie si une traduction est possible (directe ou via pivot)
+        avec les packs déjà installés, sans internet.
+        """
+        try:
+            installed = argostranslate.translate.get_installed_languages()
+            codes = {l.code: l for l in installed}
+
+            # Chemin direct
+            if src in codes and tgt in codes:
+                if codes[src].get_translation(codes[tgt]):
                     return True
+
+            # Via anglais
+            if "en" in codes:
+                if (src in codes and codes[src].get_translation(codes["en"]) and
+                        codes["en"].get_translation(codes.get(tgt))):
+                    return True
+
             return False
         except Exception:
             return False
 
-    # ── Glossaire ─────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────
+    # Glossaire
+    # ────────────────────────────────────────────────────────────────────────
 
     def _protect_glossary(self, text: str):
         """Remplace les termes du glossaire par des tokens pour les protéger."""
         mapping = {}
         protected = text
-        for i, term in enumerate(self._glossary):
-            if term.lower() in text.lower():
+        for i, term in enumerate(sorted(self._glossary, key=len, reverse=True)):
+            if term.lower() in protected.lower():
                 token = f"__TERM{i}__"
                 mapping[token] = term
-                # Remplacement insensible à la casse
-                import re
-                protected = re.sub(re.escape(term), token, protected, flags=re.IGNORECASE)
+                protected = re.sub(
+                    re.escape(term), token, protected, flags=re.IGNORECASE)
         return protected, mapping
 
     def _restore_glossary(self, text: str, mapping: dict) -> str:
@@ -416,11 +531,17 @@ class TranslationEngine:
         except Exception:
             pass
 
-    # ── Utilitaires ──────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────
+    # Utilitaires publics
+    # ────────────────────────────────────────────────────────────────────────
 
     @property
     def is_ready(self) -> bool:
         return self._ready
+
+    @property
+    def source_language(self) -> str:
+        return self._source_lang
 
     @property
     def target_language(self) -> str:
@@ -428,6 +549,7 @@ class TranslationEngine:
 
     @staticmethod
     def get_supported_languages() -> list:
+        """Retourne la liste complète des 9 langues supportées."""
         return SUPPORTED_LANGUAGES
 
     @staticmethod
@@ -436,11 +558,28 @@ class TranslationEngine:
 
     @staticmethod
     def get_installed_packs() -> list:
-        """Retourne la liste des packs argos déjà installés."""
+        """Retourne les codes des packs argostranslate installés."""
         if not ARGOS_AVAILABLE:
             return []
         try:
             installed = argostranslate.translate.get_installed_languages()
             return [l.code for l in installed]
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_installed_pairs() -> list:
+        """Retourne toutes les paires (src, tgt) installées."""
+        if not ARGOS_AVAILABLE:
+            return []
+        try:
+            installed = argostranslate.translate.get_installed_languages()
+            pairs = []
+            for src_lang in installed:
+                for tgt_lang in installed:
+                    if src_lang.code != tgt_lang.code:
+                        if src_lang.get_translation(tgt_lang):
+                            pairs.append((src_lang.code, tgt_lang.code))
+            return pairs
         except Exception:
             return []

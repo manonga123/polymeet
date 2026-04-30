@@ -137,7 +137,7 @@ ctk.set_default_color_theme("blue")
 # ─── Paramètres réseau ──────────────────────────────────────────────────────
 DROIDCAM_IP   = "192.168.43.102"
 DROIDCAM_PORT = 4747
-SERVER_IP     = "192.168.43.63"
+SERVER_IP     = "192.168.0.140"
 SERVER_PORT   = 9765
 
 # ─── Paramètres vidéo ───────────────────────────────────────────────────────

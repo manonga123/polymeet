@@ -27,4 +27,4 @@ sudo modprobe v4l2loopback
 ls /dev/video*
 
 
-droidcam-cli 192.168.43.90 4747
+droidcam-cli 192.168.0.15 4747

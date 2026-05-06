@@ -120,9 +120,9 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ─── Paramètres réseau ──────────────────────────────────────────────────────
-DROIDCAM_IP   = "192.168.43.102"
+DROIDCAM_IP   = "192.168.O.14"
 DROIDCAM_PORT = 4747
-SERVER_IP     = "192.168.43.63"
+SERVER_IP     = "192.168.56.1"
 SERVER_PORT   = 9765
 
 # ─── Paramètres vidéo ───────────────────────────────────────────────────────
@@ -131,28 +131,22 @@ FRAME_RESIZE      = (320, 240)
 FRAME_INTERVAL_MS = 50        # ~20 fps
 
 # ─── Paramètres audio ───────────────────────────────────────────────────────
-# 44100 Hz = taux universel compatible avec tous les micros (DroidCam inclus)
 AUDIO_RATE      = 44100
 AUDIO_CHANNELS  = 1
 AUDIO_FORMAT    = pyaudio.paInt16
-AUDIO_CHUNK     = 2048         # plus grand chunk pour 44100 Hz
+AUDIO_CHUNK     = 2048
 AUDIO_VAD_RMS   = 300
 AUDIO_QUEUE_MAX = 8
-# Taux cible pour Whisper (il faut 16000 Hz) — on rééchantillonne à la volée
 WHISPER_RATE    = 16000
 
-# ─── Paramètres enregistrement [F-02] ───────────────────────────────────────
+# ─── Enregistrement ─────────────────────────────────────────────────────────
 RECORDINGS_DIR      = "recordings"
-AUTOSAVE_INTERVAL_S = 300          # 5 minutes
+AUTOSAVE_INTERVAL_S = 300
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
 # ─── Liste des microphones disponibles ──────────────────────────────────────
 def list_microphones():
-    """
-    Retourne une liste de tuples (device_index, label, sample_rate)
-    pour tous les micros disponibles sur le système.
-    """
     mics = []
     try:
         pa = pyaudio.PyAudio()
@@ -168,7 +162,6 @@ def list_microphones():
     return mics
 
 
-# ─── Détection de TOUTES les sources caméra disponibles ─────────────────────
 def list_all_camera_sources():
     sources = []
     url = f"http://{DROIDCAM_IP}:{DROIDCAM_PORT}/mjpegfeed"
@@ -195,28 +188,20 @@ class VideoTile(tk.Frame):
         super().__init__(parent, bg=bg, **kwargs)
         self.name  = name
         self.is_me = is_me
-
         bar_bg = "#1a4a8a" if is_me else "#2a2a4a"
         tag    = " (Vous)" if is_me else ""
-
         self.name_bar = tk.Frame(self, bg=bar_bg, height=22)
         self.name_bar.pack(side="bottom", fill="x")
         self.name_bar.pack_propagate(False)
-
         self.name_lbl = tk.Label(
             self.name_bar, text=f"  {name}{tag}",
-            bg=bar_bg, fg="white",
-            font=("Arial", 10, "bold"), anchor="w")
+            bg=bar_bg, fg="white", font=("Arial", 10, "bold"), anchor="w")
         self.name_lbl.pack(side="left", fill="both", expand=True)
-
         self.mic_indicator = tk.Label(
-            self.name_bar, text="🎤", bg=bar_bg,
-            font=("Arial", 9), fg="#555")
+            self.name_bar, text="🎤", bg=bar_bg, font=("Arial", 9), fg="#555")
         self.mic_indicator.pack(side="right", padx=4)
-
         self.img_label = tk.Label(
-            self, text="⏳\nEn attente…",
-            bg=bg, fg="#555", font=("Arial", 16))
+            self, text="⏳\nEn attente…", bg=bg, fg="#555", font=("Arial", 16))
         self.img_label.pack(expand=True, fill="both")
 
     def update_frame(self, pil_image):
@@ -245,7 +230,7 @@ class AudioEngine:
                  device_index=None, device_rate=None):
         self.on_chunk_ready  = on_chunk_ready
         self.on_record_chunk = on_record_chunk
-        self.device_index    = device_index       # None = périphérique par défaut
+        self.device_index    = device_index
         self.device_rate     = device_rate or AUDIO_RATE
         self.pa              = None
         self.in_stream       = None
@@ -262,67 +247,49 @@ class AudioEngine:
         except Exception as e:
             print(f"[Audio] PyAudio indisponible : {e}")
             return False
-
-        # Résoudre le périphérique par défaut si non spécifié
         if self.device_index is None:
             try:
                 info = self.pa.get_default_input_device_info()
                 self.device_index = info["index"]
                 self.device_rate  = int(info["defaultSampleRate"])
             except Exception:
-                self.device_index = None
-                self.device_rate  = AUDIO_RATE
-
-        print(f"[Audio] Micro index={self.device_index}, taux={self.device_rate} Hz")
-
+                pass
         try:
             kwargs = dict(
-                format=AUDIO_FORMAT,
-                channels=AUDIO_CHANNELS,
-                rate=self.device_rate,
-                input=True,
+                format=AUDIO_FORMAT, channels=AUDIO_CHANNELS,
+                rate=self.device_rate, input=True,
                 frames_per_buffer=AUDIO_CHUNK,
-                stream_callback=self._capture_callback
-            )
+                stream_callback=self._capture_callback)
             if self.device_index is not None:
                 kwargs["input_device_index"] = self.device_index
             self.in_stream = self.pa.open(**kwargs)
             self.in_stream.start_stream()
-            print(f"[Audio] ✅ Capture micro démarrée ({self.device_rate} Hz)")
         except Exception as e:
             print(f"[Audio] ❌ Micro : {e}")
             return False
-
         try:
             self.out_stream = self.pa.open(
-                format=AUDIO_FORMAT,
-                channels=AUDIO_CHANNELS,
-                rate=self.device_rate,
-                output=True,
-                frames_per_buffer=AUDIO_CHUNK
-            )
-            print(f"[Audio] ✅ Lecture audio démarrée")
+                format=AUDIO_FORMAT, channels=AUDIO_CHANNELS,
+                rate=self.device_rate, output=True,
+                frames_per_buffer=AUDIO_CHUNK)
         except Exception as e:
             print(f"[Audio] ❌ HP : {e}")
             return False
-
-        self.running = True
+        self.running    = True
         self._pb_thread = threading.Thread(target=self._playback_loop, daemon=True)
         self._pb_thread.start()
         return True
 
     def stop(self):
         self.running = False
-        for stream in (self.in_stream, self.out_stream):
-            if stream:
-                try:
-                    stream.stop_stream(); stream.close()
-                except Exception:
-                    pass
+        for s in (self.in_stream, self.out_stream):
+            if s:
+                try: s.stop_stream(); s.close()
+                except: pass
         self.in_stream = self.out_stream = None
         if self.pa:
             try: self.pa.terminate()
-            except Exception: pass
+            except: pass
             self.pa = None
         with self._lock:
             self.audio_queues.clear()
@@ -331,35 +298,31 @@ class AudioEngine:
         self.muted = not self.muted
         return self.muted
 
-    def receive_chunk(self, name: str, b64_chunk: str):
+    def receive_chunk(self, name, b64_chunk):
         try:
             raw = base64.b64decode(b64_chunk)
-        except Exception:
-            return
+        except: return
         with self._lock:
             if name not in self.audio_queues:
                 self.audio_queues[name] = deque(maxlen=AUDIO_QUEUE_MAX)
             self.audio_queues[name].append(raw)
 
-    def remove_participant(self, name: str):
+    def remove_participant(self, name):
         with self._lock:
             self.audio_queues.pop(name, None)
 
-    def resample_to_whisper(self, raw_bytes: bytes) -> bytes:
-        """Rééchantillonne de device_rate vers WHISPER_RATE (16000 Hz)."""
+    def resample_to_whisper(self, raw_bytes):
         if self.device_rate == WHISPER_RATE:
             return raw_bytes
         try:
-            samples  = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
-            ratio    = WHISPER_RATE / self.device_rate
-            new_len  = max(1, int(len(samples) * ratio))
+            samples   = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
+            ratio     = WHISPER_RATE / self.device_rate
+            new_len   = max(1, int(len(samples) * ratio))
             resampled = np.interp(
-                np.linspace(0, len(samples) - 1, new_len),
-                np.arange(len(samples)), samples
-            ).astype(np.int16)
+                np.linspace(0, len(samples)-1, new_len),
+                np.arange(len(samples)), samples).astype(np.int16)
             return resampled.tobytes()
-        except Exception:
-            return raw_bytes
+        except: return raw_bytes
 
     def _capture_callback(self, in_data, frame_count, time_info, status):
         if in_data:
@@ -367,7 +330,7 @@ class AudioEngine:
                 self.on_record_chunk(in_data)
             if not self.muted:
                 samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
-                rms = float(np.sqrt(np.mean(samples ** 2))) if len(samples) > 0 else 0.0
+                rms = float(np.sqrt(np.mean(samples**2))) if len(samples) > 0 else 0.0
                 if rms > AUDIO_VAD_RMS:
                     b64 = base64.b64encode(in_data).decode()
                     self.on_chunk_ready(b64)
@@ -381,69 +344,56 @@ class AudioEngine:
                 names = list(self.audio_queues.keys())
             for name in names:
                 with self._lock:
-                    q = self.audio_queues.get(name)
+                    q     = self.audio_queues.get(name)
                     chunk = q.popleft() if q and len(q) > 0 else None
                 if chunk and len(chunk) == AUDIO_CHUNK * 2:
-                    arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+                    arr   = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
                     mixed = arr if mixed is None else mixed + arr
             if mixed is not None:
                 mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
-                data = mixed.tobytes()
+                data  = mixed.tobytes()
             else:
                 data = silence
             if self.out_stream and self.running:
-                try:
-                    self.out_stream.write(data)
-                except Exception:
-                    pass
+                try: self.out_stream.write(data)
+                except: pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# [F-02] RecordingEngine — Contrôle de l'Enregistrement
+# [F-02] RecordingEngine
 # ═══════════════════════════════════════════════════════════════════════════════
 class RecordingEngine:
-    """
-    Gère l'enregistrement audio local avec :
-    - États : IDLE / RECORDING / PAUSED
-    - Sauvegarde automatique toutes les 5 minutes (anti-crash)
-    - Horodatage de chaque intervention (via callback externe)
-    - Export final en MP3 (via pydub) ou WAV fallback
-    """
-
     STATE_IDLE      = "idle"
     STATE_RECORDING = "recording"
     STATE_PAUSED    = "paused"
 
     def __init__(self):
-        self.state          = self.STATE_IDLE
-        self._frames        = []          # buffer audio courant
-        self._all_frames    = []          # buffer complet (pour export final)
-        self._lock          = threading.Lock()
-        self._start_time    = None        # datetime de début de réunion
-        self._pause_time    = None        # datetime de la dernière pause
-        self._total_paused  = 0.0         # secondes cumulées en pause
-        self._session_name  = ""          # nom du fichier de session
-        self._log_entries   = []          # horodatages [(time_str, speaker, note)]
+        self.state           = self.STATE_IDLE
+        self._frames         = []
+        self._all_frames     = []
+        self._lock           = threading.Lock()
+        self._start_time     = None
+        self._pause_time     = None
+        self._total_paused   = 0.0
+        self._session_name   = ""
+        self._log_entries    = []
         self._autosave_timer = None
 
-    # ── État ────────────────────────────────────────────────────────────────
     @property
     def is_recording(self):
         return self.state == self.STATE_RECORDING
 
     @property
     def elapsed_seconds(self):
-        """Durée réelle (pause déduite)."""
         if self._start_time is None:
             return 0.0
-        total = (datetime.datetime.now() - self._start_time).total_seconds()
+        total  = (datetime.datetime.now() - self._start_time).total_seconds()
         paused = self._total_paused
         if self.state == self.STATE_PAUSED and self._pause_time:
             paused += (datetime.datetime.now() - self._pause_time).total_seconds()
         return max(0.0, total - paused)
 
-    # ── Contrôles ───────────────────────────────────────────────────────────
-    def start(self, session_name: str = ""):
+    def start(self, session_name=""):
         if self.state != self.STATE_IDLE:
             return False
         self._start_time   = datetime.datetime.now()
@@ -453,20 +403,18 @@ class RecordingEngine:
         self._all_frames   = []
         self._log_entries  = []
         self._session_name = session_name or self._start_time.strftime("reunion_%Y%m%d_%H%M%S")
-        self.state = self.STATE_RECORDING
+        self.state         = self.STATE_RECORDING
         self._schedule_autosave()
         self._log("SYSTEM", "Enregistrement démarré")
-        print(f"[Record] ▶ Démarré : {self._session_name}")
         return True
 
     def pause(self):
         if self.state != self.STATE_RECORDING:
             return False
         self._pause_time = datetime.datetime.now()
-        self.state = self.STATE_PAUSED
+        self.state       = self.STATE_PAUSED
         self._cancel_autosave()
-        self._log("SYSTEM", "Enregistrement mis en pause")
-        print("[Record] ⏸ Pausé")
+        self._log("SYSTEM", "Pause")
         return True
 
     def resume(self):
@@ -475,10 +423,9 @@ class RecordingEngine:
         if self._pause_time:
             self._total_paused += (datetime.datetime.now() - self._pause_time).total_seconds()
         self._pause_time = None
-        self.state = self.STATE_RECORDING
+        self.state       = self.STATE_RECORDING
         self._schedule_autosave()
-        self._log("SYSTEM", "Enregistrement repris")
-        print("[Record] ▶ Repris")
+        self._log("SYSTEM", "Reprise")
         return True
 
     def stop(self):
@@ -487,39 +434,32 @@ class RecordingEngine:
         self._cancel_autosave()
         if self.state == self.STATE_PAUSED and self._pause_time:
             self._total_paused += (datetime.datetime.now() - self._pause_time).total_seconds()
-        self._log("SYSTEM", f"Enregistrement arrêté — durée : {self._fmt_duration(self.elapsed_seconds)}")
+        self._log("SYSTEM", f"Arrêté — {self._fmt_duration(self.elapsed_seconds)}")
         self.state = self.STATE_IDLE
-
-        # Sauvegarde finale
         path = self._save(self._all_frames, self._session_name, final=True)
         self._save_log()
-        print(f"[Record] ⏹ Arrêté — fichier : {path}")
         return path
 
-    # ── Réception des chunks audio ──────────────────────────────────────────
-    def add_chunk(self, raw_bytes: bytes):
+    def add_chunk(self, raw_bytes):
         if self.state != self.STATE_RECORDING:
             return
         with self._lock:
             self._frames.append(raw_bytes)
             self._all_frames.append(raw_bytes)
 
-    # ── Horodatage d'une intervention ───────────────────────────────────────
-    def log_intervention(self, speaker: str, note: str = ""):
+    def log_intervention(self, speaker, note=""):
         if self.state == self.STATE_IDLE:
             return
         self._log(speaker, note or "Intervention")
 
-    def _log(self, speaker: str, note: str):
-        ts  = datetime.datetime.now().strftime("%H:%M:%S")
-        dur = self._fmt_duration(self.elapsed_seconds)
+    def _log(self, speaker, note):
+        ts    = datetime.datetime.now().strftime("%H:%M:%S")
+        dur   = self._fmt_duration(self.elapsed_seconds)
         entry = f"[{ts}] (+{dur})  {speaker}: {note}"
         self._log_entries.append(entry)
 
-    # ── Sauvegarde automatique ───────────────────────────────────────────────
     def _schedule_autosave(self):
-        self._autosave_timer = threading.Timer(
-            AUTOSAVE_INTERVAL_S, self._autosave_callback)
+        self._autosave_timer = threading.Timer(AUTOSAVE_INTERVAL_S, self._autosave_callback)
         self._autosave_timer.daemon = True
         self._autosave_timer.start()
 
@@ -532,69 +472,60 @@ class RecordingEngine:
         if self.state != self.STATE_RECORDING:
             return
         with self._lock:
-            frames_copy = list(self._frames)
+            frames_copy  = list(self._frames)
             self._frames = []
         ts   = datetime.datetime.now().strftime("%H%M%S")
         name = f"{self._session_name}_autosave_{ts}"
-        path = self._save(frames_copy, name, final=False)
-        print(f"[Record] 💾 Autosave → {path}")
-        self._schedule_autosave()   # replanifier
+        self._save(frames_copy, name, final=False)
+        self._schedule_autosave()
 
-    # ── Export WAV / MP3 ────────────────────────────────────────────────────
-    def _save(self, frames: list, name: str, final: bool) -> str:
+    def _save(self, frames, name, final):
         if not frames:
             return ""
-
         wav_path = os.path.join(RECORDINGS_DIR, f"{name}.wav")
         try:
             with wave.open(wav_path, "wb") as wf:
                 wf.setnchannels(AUDIO_CHANNELS)
-                wf.setsampwidth(2)          # paInt16 = 2 bytes
+                wf.setsampwidth(2)
                 wf.setframerate(AUDIO_RATE)
                 wf.writeframes(b"".join(frames))
         except Exception as e:
-            print(f"[Record] ❌ Erreur WAV : {e}")
+            print(f"[Record] ❌ WAV : {e}")
             return ""
-
-        # Conversion MP3 si pydub disponible (final uniquement)
         if final and PYDUB_AVAILABLE:
             mp3_path = os.path.join(RECORDINGS_DIR, f"{name}.mp3")
             try:
-                audio = AudioSegment.from_wav(wav_path)
-                audio.export(mp3_path, format="mp3", bitrate="64k")
+                AudioSegment.from_wav(wav_path).export(mp3_path, format="mp3", bitrate="64k")
                 os.remove(wav_path)
                 return mp3_path
-            except Exception as e:
-                print(f"[Record] ⚠ MP3 échoué, conservé en WAV : {e}")
-                return wav_path
-
+            except: return wav_path
         return wav_path
 
     def _save_log(self):
         if not self._log_entries:
             return
-        log_path = os.path.join(RECORDINGS_DIR, f"{self._session_name}_log.txt")
+        path = os.path.join(RECORDINGS_DIR, f"{self._session_name}_log.txt")
         try:
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write(f"PolyMeet — Journal d'horodatage\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("PolyMeet — Journal\n")
                 f.write(f"Session : {self._session_name}\n")
-                f.write(f"Date    : {datetime.datetime.now().strftime('%d/%m/%Y')}\n")
                 f.write("─" * 50 + "\n\n")
-                for entry in self._log_entries:
-                    f.write(entry + "\n")
-            print(f"[Record] 📝 Log → {log_path}")
+                for e in self._log_entries:
+                    f.write(e + "\n")
         except Exception as e:
-            print(f"[Record] ❌ Erreur log : {e}")
+            print(f"[Record] ❌ Log : {e}")
 
     @staticmethod
-    def _fmt_duration(seconds: float) -> str:
+    def _fmt_duration(seconds):
         s = int(seconds)
         h, r = divmod(s, 3600)
         m, s = divmod(r, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-# ─── Application principale ───────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# Application principale
+# ═════════════════════════════════════════════════════════════════════════════
 class VideoCallApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -609,655 +540,403 @@ class VideoCallApp(ctk.CTk):
         self.frame_job   = None
         self.call_active = False
         self.my_name     = ""
+        self.cam_sources = []
+        self.cam_index   = 0
+        self.cam_source  = None
+        self.mic_sources = []
+        self.mic_index   = 0
 
-        self.cam_sources  = []
-        self.cam_index    = 0
-        self.cam_source   = None
-
-        # Microphones [F-01]
-        self.mic_sources  = []   # liste (device_index, label, rate)
-        self.mic_index    = 0    # index courant dans mic_sources
-
-        self.audio_engine:         AudioEngine    | None = None
-        self.recording_engine:     RecordingEngine        = RecordingEngine()
-        self.transcription_engine                         = None  # [F-03]
-        self.diarization_engine                           = None  # [F-04]
-        self.translation_engine                           = None  # [F-05]
-        self.analysis_engine                              = AnalysisEngine() if ANALYSIS_AVAILABLE else None  # [F-07]
-        self.report_engine                                = ReportEngine()   if REPORT_AVAILABLE   else None  # [F-09]
-        self._last_analysis                               = None  # dernier résultat
+        self.audio_engine         = None
+        self.recording_engine     = RecordingEngine()
+        self.transcription_engine = None
+        self.diarization_engine   = None
+        self.translation_engine   = None
+        self.analysis_engine      = AnalysisEngine() if ANALYSIS_AVAILABLE else None
+        self.report_engine        = ReportEngine()   if REPORT_AVAILABLE   else None
+        self._last_analysis       = None
+        self._transcript_entries  = []
 
         self.tiles   = {}
         self.my_tile = None
-
-        # Timer d'affichage de la durée [F-02]
         self._clock_job = None
-
-        # Pour le rapport : stocker les entrées de transcription
-        self._transcript_entries = []
 
         self._build_ui()
         self.bind("<Configure>", lambda e: self.after(100, self._relayout_grid))
-
-        # ── Raccourcis clavier [F-02] ────────────────────────────────────
         self.bind("<Control-r>", lambda e: self._rec_start())
         self.bind("<Control-p>", lambda e: self._rec_pause_resume())
         self.bind("<Control-s>", lambda e: self._rec_stop())
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Construction de l'interface
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── UI ───────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        # ── Barre du haut ─────────────────────────────────────────────────
         topbar = ctk.CTkFrame(self, height=52, fg_color="#161b22", corner_radius=0)
         topbar.pack(fill="x", side="top")
         topbar.pack_propagate(False)
-
-        ctk.CTkLabel(topbar, text="🎥 PolyMeet",
-                     font=("Arial", 18, "bold")).pack(side="left", padx=18)
-
-        self.status_lbl = ctk.CTkLabel(
-            topbar, text="⬤ Déconnecté",
-            font=("Arial", 12), text_color="#888")
+        ctk.CTkLabel(topbar, text="🎥 PolyMeet", font=("Arial", 18, "bold")).pack(side="left", padx=18)
+        self.status_lbl = ctk.CTkLabel(topbar, text="⬤ Déconnecté", font=("Arial", 12), text_color="#888")
         self.status_lbl.pack(side="right", padx=18)
-
-        self.members_lbl = ctk.CTkLabel(
-            topbar, text="👥 0 participant(s)",
-            font=("Arial", 11), text_color="#aaa")
+        self.members_lbl = ctk.CTkLabel(topbar, text="👥 0 participant(s)", font=("Arial", 11), text_color="#aaa")
         self.members_lbl.pack(side="right", padx=10)
 
-        # ── Barre de formulaire ───────────────────────────────────────────
         form = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=0, height=50)
         form.pack(fill="x", side="top")
         form.pack_propagate(False)
-
-        ctk.CTkLabel(form, text="Nom :", width=40,
-                     font=("Arial", 11)).pack(side="left", padx=(14, 2))
-        self.name_entry = ctk.CTkEntry(
-            form, placeholder_text="Votre prénom", width=130, height=32)
-        self.name_entry.pack(side="left", padx=(0, 10))
-
-        ctk.CTkLabel(form, text="Salle :", width=40,
-                     font=("Arial", 11)).pack(side="left", padx=(0, 2))
-        self.room_entry = ctk.CTkEntry(
-            form, placeholder_text="general", width=110, height=32)
-        self.room_entry.pack(side="left", padx=(0, 10))
-
-        ctk.CTkLabel(form, text="IP :", width=25,
-                     font=("Arial", 11)).pack(side="left", padx=(0, 2))
-        self.server_entry = ctk.CTkEntry(
-            form, placeholder_text=SERVER_IP, width=130, height=32)
-        self.server_entry.pack(side="left", padx=(0, 10))
-
-        self.cam_status = ctk.CTkLabel(
-            form, text="📷 —", font=("Arial", 10), text_color="#888")
-        self.cam_status.pack(side="left", padx=(0, 4))
-
-        self.mic_status = ctk.CTkLabel(
-            form, text="🎤 —", font=("Arial", 10), text_color="#888")
-        self.mic_status.pack(side="left", padx=(0, 4))
-
-        # Sélecteur de micro [F-01]
+        ctk.CTkLabel(form, text="Nom :", width=40, font=("Arial", 11)).pack(side="left", padx=(14,2))
+        self.name_entry = ctk.CTkEntry(form, placeholder_text="Votre prénom", width=120, height=32)
+        self.name_entry.pack(side="left", padx=(0,8))
+        ctk.CTkLabel(form, text="Salle :", width=40, font=("Arial", 11)).pack(side="left", padx=(0,2))
+        self.room_entry = ctk.CTkEntry(form, placeholder_text="general", width=100, height=32)
+        self.room_entry.pack(side="left", padx=(0,8))
+        ctk.CTkLabel(form, text="IP :", width=25, font=("Arial", 11)).pack(side="left", padx=(0,2))
+        self.server_entry = ctk.CTkEntry(form, placeholder_text=SERVER_IP, width=120, height=32)
+        self.server_entry.pack(side="left", padx=(0,8))
+        self.cam_status = ctk.CTkLabel(form, text="📷 —", font=("Arial", 10), text_color="#888")
+        self.cam_status.pack(side="left", padx=(0,4))
+        self.mic_status = ctk.CTkLabel(form, text="🎤 —", font=("Arial", 10), text_color="#888")
+        self.mic_status.pack(side="left", padx=(0,4))
         self._mic_var = tk.StringVar(value="— Micro —")
-        self.mic_selector = ctk.CTkOptionMenu(
-            form, variable=self._mic_var,
-            values=["— Micro —"],
-            width=180, height=28,
-            font=("Arial", 9),
-            fg_color="#1a2a3a", button_color="#1e3248",
-            command=self._on_mic_selected)
-        self.mic_selector.pack(side="left", padx=(0, 6))
+        self.mic_selector = ctk.CTkOptionMenu(form, variable=self._mic_var, values=["— Micro —"],
+                                              width=170, height=28, font=("Arial", 9),
+                                              fg_color="#1a2a3a", button_color="#1e3248",
+                                              command=self._on_mic_selected)
+        self.mic_selector.pack(side="left", padx=(0,6))
         self._populate_mic_selector()
+        self.join_btn = ctk.CTkButton(form, text="📞 Rejoindre", width=110, height=32,
+                                       fg_color="#1a7a3c", hover_color="#145e2e",
+                                       font=("Arial", 12, "bold"), command=self._join)
+        self.join_btn.pack(side="left", padx=(0,6))
+        self.leave_btn = ctk.CTkButton(form, text="📵 Quitter", width=90, height=32,
+                                        fg_color="#b03030", hover_color="#8a2020",
+                                        font=("Arial", 12, "bold"), command=self._leave, state="disabled")
+        self.leave_btn.pack(side="left", padx=(0,6))
+        self.mute_btn = ctk.CTkButton(form, text="🎤 Mute", width=84, height=32,
+                                       fg_color="#444", hover_color="#555",
+                                       font=("Arial", 11, "bold"), command=self._toggle_mute, state="disabled")
+        self.mute_btn.pack(side="left", padx=(0,6))
+        self.cam_btn = ctk.CTkButton(form, text="🔄 Caméra", width=94, height=32,
+                                      fg_color="#1a3a6a", hover_color="#142c52",
+                                      font=("Arial", 11, "bold"), command=self._switch_camera, state="disabled")
+        self.cam_btn.pack(side="left", padx=(0,6))
 
-        self.join_btn = ctk.CTkButton(
-            form, text="📞 Rejoindre", width=110, height=32,
-            fg_color="#1a7a3c", hover_color="#145e2e",
-            font=("Arial", 12, "bold"), command=self._join)
-        self.join_btn.pack(side="left", padx=(0, 6))
-
-        self.leave_btn = ctk.CTkButton(
-            form, text="📵 Quitter", width=90, height=32,
-            fg_color="#b03030", hover_color="#8a2020",
-            font=("Arial", 12, "bold"),
-            command=self._leave, state="disabled")
-        self.leave_btn.pack(side="left", padx=(0, 6))
-
-        self.mute_btn = ctk.CTkButton(
-            form, text="🎤 Mute", width=84, height=32,
-            fg_color="#444", hover_color="#555",
-            font=("Arial", 11, "bold"),
-            command=self._toggle_mute, state="disabled")
-        self.mute_btn.pack(side="left", padx=(0, 6))
-
-        self.cam_btn = ctk.CTkButton(
-            form, text="🔄 Caméra", width=94, height=32,
-            fg_color="#1a3a6a", hover_color="#142c52",
-            font=("Arial", 11, "bold"),
-            command=self._switch_camera, state="disabled")
-        self.cam_btn.pack(side="left", padx=(0, 6))
-
-        # ── Zone centrale : grille + chat ─────────────────────────────────
         center = ctk.CTkFrame(self, fg_color="transparent")
         center.pack(fill="both", expand=True)
-
         grid_outer = ctk.CTkFrame(center, fg_color="#0d1117", corner_radius=0)
         grid_outer.pack(side="left", fill="both", expand=True)
-
         self.grid_canvas = tk.Frame(grid_outer, bg="#0d1117")
         self.grid_canvas.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # ── Panneau droit : onglets Chat, Transcription, Traduction, Rapport
-        right_panel = ctk.CTkFrame(center, width=290, fg_color="#161b22",
-                                   corner_radius=0)
+        right_panel = ctk.CTkFrame(center, width=290, fg_color="#161b22", corner_radius=0)
         right_panel.pack(side="right", fill="y")
         right_panel.pack_propagate(False)
 
-        # ── Barre d'onglets sur DEUX LIGNES (2x2) ─────────────────────────
         tab_bar = ctk.CTkFrame(right_panel, fg_color="#0d1117", corner_radius=0)
         tab_bar.pack(fill="x", side="top")
-
-        # Ligne 1 : Chat + Transcription
         tab_row1 = ctk.CTkFrame(tab_bar, fg_color="#0d1117", height=34)
         tab_row1.pack(fill="x")
         tab_row1.pack_propagate(False)
-
-        self._active_tab = tk.StringVar(value="chat")
-
-        self.tab_chat_btn = ctk.CTkButton(
-            tab_row1, text="💬 Chat", width=136, height=32,
-            fg_color="#1a2a3a", hover_color="#1e3248",
-            font=("Arial", 10, "bold"),
-            command=lambda: self._switch_tab("chat"))
-        self.tab_chat_btn.pack(side="left", padx=(2, 1), pady=1)
-
-        self.tab_trans_btn = ctk.CTkButton(
-            tab_row1, text="📝 Transcription", width=136, height=32,
-            fg_color="#111820", hover_color="#1e3248",
-            font=("Arial", 10),
-            command=lambda: self._switch_tab("transcription"))
-        self.tab_trans_btn.pack(side="left", padx=(1, 2), pady=1)
-
-        # Ligne 2 : Traduction + Rapport
         tab_row2 = ctk.CTkFrame(tab_bar, fg_color="#0d1117", height=34)
         tab_row2.pack(fill="x")
         tab_row2.pack_propagate(False)
 
-        self.tab_trad_btn = ctk.CTkButton(
-            tab_row2, text="🌍 Traduction", width=136, height=32,
-            fg_color="#111820", hover_color="#1e3248",
-            font=("Arial", 10),
-            command=lambda: self._switch_tab("traduction"))
-        self.tab_trad_btn.pack(side="left", padx=(2, 1), pady=1)
+        self._active_tab = tk.StringVar(value="chat")
+        self.tab_chat_btn = ctk.CTkButton(tab_row1, text="💬 Chat", width=136, height=32,
+                                          fg_color="#1a2a3a", hover_color="#1e3248",
+                                          font=("Arial", 10, "bold"),
+                                          command=lambda: self._switch_tab("chat"))
+        self.tab_chat_btn.pack(side="left", padx=(2,1), pady=1)
+        self.tab_trans_btn = ctk.CTkButton(tab_row1, text="📝 Transcription", width=136, height=32,
+                                           fg_color="#111820", hover_color="#1e3248",
+                                           font=("Arial", 10),
+                                           command=lambda: self._switch_tab("transcription"))
+        self.tab_trans_btn.pack(side="left", padx=(1,2), pady=1)
+        self.tab_trad_btn = ctk.CTkButton(tab_row2, text="🌍 Traduction", width=136, height=32,
+                                          fg_color="#111820", hover_color="#1e3248",
+                                          font=("Arial", 10),
+                                          command=lambda: self._switch_tab("traduction"))
+        self.tab_trad_btn.pack(side="left", padx=(2,1), pady=1)
+        self.tab_report_btn = ctk.CTkButton(tab_row2, text="📊 Rapport", width=136, height=32,
+                                            fg_color="#111820", hover_color="#1e3248",
+                                            font=("Arial", 10),
+                                            command=lambda: self._switch_tab("rapport"))
+        self.tab_report_btn.pack(side="left", padx=(1,2), pady=1)
 
-        self.tab_report_btn = ctk.CTkButton(
-            tab_row2, text="📊 Rapport", width=136, height=32,
-            fg_color="#111820", hover_color="#1e3248",
-            font=("Arial", 10),
-            command=lambda: self._switch_tab("rapport"))
-        self.tab_report_btn.pack(side="left", padx=(1, 2), pady=1)
-
-        # ── Contenu des onglets ──────────────────────────────────────────
         self._build_tab_chat(right_panel)
         self._build_tab_transcription(right_panel)
         self._build_tab_traduction(right_panel)
         self._build_tab_rapport(right_panel)
 
-        # Afficher l'onglet chat par défaut
         self._switch_tab("chat")
-
-        # ── Panneau d'enregistrement (bas) ──────────────────────────────────
         self._build_recording_panel()
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Gestion des onglets
-    # ──────────────────────────────────────────────────────────────────────────
-    def _switch_tab(self, tab: str):
-        """Affiche l'onglet demandé et cache les autres."""
+    def _switch_tab(self, tab):
         self._active_tab.set(tab)
-
-        # Cacher toutes les frames d'onglets
-        for fr in [self.chat_frame, self.trans_frame,
-                   self.trad_frame, self.rapport_frame]:
+        for fr in [self.chat_frame, self.trans_frame, self.trad_frame, self.rapport_frame]:
             if fr.winfo_ismapped():
                 fr.pack_forget()
-
-        # Afficher celle demandée
         if tab == "chat":
             self.chat_frame.pack(fill="both", expand=True)
             self.tab_chat_btn.configure(fg_color="#1a2a3a")
         else:
             self.tab_chat_btn.configure(fg_color="#111820")
-
         if tab == "transcription":
             self.trans_frame.pack(fill="both", expand=True)
             self.tab_trans_btn.configure(fg_color="#1a2a3a")
         else:
             self.tab_trans_btn.configure(fg_color="#111820")
-
         if tab == "traduction":
             self.trad_frame.pack(fill="both", expand=True)
             self.tab_trad_btn.configure(fg_color="#1a2a3a")
         else:
             self.tab_trad_btn.configure(fg_color="#111820")
-
         if tab == "rapport":
             self.rapport_frame.pack(fill="both", expand=True)
             self.tab_report_btn.configure(fg_color="#1a2a3a")
         else:
             self.tab_report_btn.configure(fg_color="#111820")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Construction onglet CHAT
-    # ──────────────────────────────────────────────────────────────────────────
     def _build_tab_chat(self, parent):
         self.chat_frame = ctk.CTkFrame(parent, fg_color="transparent")
-
-        self.chat_box = ctk.CTkTextbox(
-            self.chat_frame, font=("Arial", 11), wrap="word")
-        self.chat_box.pack(fill="both", expand=True, padx=8, pady=(6, 4))
+        self.chat_box = ctk.CTkTextbox(self.chat_frame, font=("Arial", 11), wrap="word")
+        self.chat_box.pack(fill="both", expand=True, padx=8, pady=(6,4))
         self.chat_box.configure(state="disabled")
-
         chat_row = ctk.CTkFrame(self.chat_frame, fg_color="transparent")
-        chat_row.pack(fill="x", padx=8, pady=(0, 10))
-        self.chat_entry = ctk.CTkEntry(
-            chat_row, placeholder_text="Message…", height=32)
-        self.chat_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        chat_row.pack(fill="x", padx=8, pady=(0,10))
+        self.chat_entry = ctk.CTkEntry(chat_row, placeholder_text="Message…", height=32)
+        self.chat_entry.pack(side="left", fill="x", expand=True, padx=(0,6))
         self.chat_entry.bind("<Return>", lambda e: self._send_chat())
-        ctk.CTkButton(
-            chat_row, text="↩", width=34, height=32,
-            command=self._send_chat).pack(side="left")
+        ctk.CTkButton(chat_row, text="↩", width=34, height=32, command=self._send_chat).pack(side="left")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Construction onglet TRANSCRIPTION (intact, seule la partie traduction part)
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── Transcription (devenue scrollable pour garantir tous les boutons visibles) ──
     def _build_tab_transcription(self, parent):
-        self.trans_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.trans_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")  # <-- scrollable !
 
-        # ── Sous-panneau Speakers [F-04] ─────────────────────────────────
+        # Speakers
         self.speakers_panel = ctk.CTkFrame(
             self.trans_frame, fg_color="#0d1520",
             corner_radius=6, border_width=1, border_color="#1e2d45")
-        self.speakers_panel.pack(fill="x", padx=8, pady=(6, 4))
-
+        self.speakers_panel.pack(fill="x", padx=8, pady=(6,4))
         spk_header = ctk.CTkFrame(self.speakers_panel, fg_color="transparent")
-        spk_header.pack(fill="x", padx=8, pady=(4, 2))
-
+        spk_header.pack(fill="x", padx=8, pady=(4,2))
         ctk.CTkLabel(spk_header, text="👥 Participants",
-                     font=("Arial", 10, "bold"),
-                     text_color="#4a7abf").pack(side="left")
-
-        self.spk_count_lbl = ctk.CTkLabel(
-            spk_header, text="0 speaker(s)",
-            font=("Arial", 9), text_color="#555")
+                     font=("Arial", 10, "bold"), text_color="#4a7abf").pack(side="left")
+        self.spk_count_lbl = ctk.CTkLabel(spk_header, text="0 speaker(s)", font=("Arial", 9), text_color="#555")
         self.spk_count_lbl.pack(side="right")
-
-        # Zone scrollable pour les badges speakers
         self.spk_list_frame = ctk.CTkScrollableFrame(
-            self.speakers_panel, fg_color="transparent",
-            height=70, scrollbar_button_color="#1e2d45")
-        self.spk_list_frame.pack(fill="x", padx=4, pady=(0, 4))
-
+            self.speakers_panel, fg_color="transparent", height=60,
+            scrollbar_button_color="#1e2d45")
+        self.spk_list_frame.pack(fill="x", padx=4, pady=(0,4))
         self._speaker_badges = {}
 
-        # Status langue détectée
         trans_top = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
-        trans_top.pack(fill="x", padx=8, pady=(2, 2))
-
-        ctk.CTkLabel(trans_top, text="Langue :",
-                     font=("Arial", 10), text_color="#555").pack(side="left")
-        self.trans_lang_lbl = ctk.CTkLabel(
-            trans_top, text="—",
-            font=("Arial", 10, "bold"), text_color="#4a9abf")
-        self.trans_lang_lbl.pack(side="left", padx=(4, 0))
-
-        self.trans_status_lbl = ctk.CTkLabel(
-            trans_top, text="⬤ Inactif",
-            font=("Arial", 10), text_color="#444")
+        trans_top.pack(fill="x", padx=8, pady=(2,2))
+        ctk.CTkLabel(trans_top, text="Langue :", font=("Arial", 10), text_color="#555").pack(side="left")
+        self.trans_lang_lbl = ctk.CTkLabel(trans_top, text="—", font=("Arial", 10, "bold"), text_color="#4a9abf")
+        self.trans_lang_lbl.pack(side="left", padx=(4,0))
+        self.trans_status_lbl = ctk.CTkLabel(trans_top, text="⬤ Inactif", font=("Arial", 10), text_color="#444")
         self.trans_status_lbl.pack(side="right")
 
-        # Zone de texte transcrit (éditable = correction en direct)
-        self.trans_box = ctk.CTkTextbox(
-            self.trans_frame, font=("Arial", 11), wrap="word")
-        self.trans_box.pack(fill="both", expand=True, padx=8, pady=(2, 4))
+        self.trans_box = ctk.CTkTextbox(self.trans_frame, font=("Arial", 11), wrap="word", height=140)  # hauteur fixe
+        self.trans_box.pack(fill="x", padx=8, pady=(2,4))   # ne plus expand à fond pour laisser les boutons visibles
         self.trans_box.insert("end", "La transcription apparaîtra ici…\n")
         self.trans_box.configure(text_color="#555")
 
-        # Boutons actions transcription
+        # Boutons actions
         trans_btns = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
-        trans_btns.pack(fill="x", padx=8, pady=(0, 10))
-
+        trans_btns.pack(fill="x", padx=8, pady=(0,6))
         self.trans_toggle_btn = ctk.CTkButton(
-            trans_btns, text="▶ Activer", width=110, height=30,
+            trans_btns, text="▶ Activer", width=100, height=30,
             fg_color="#1a4a6a", hover_color="#143a54",
-            font=("Arial", 10, "bold"),
-            command=self._toggle_transcription)
-        self.trans_toggle_btn.pack(side="left", padx=(0, 6))
+            font=("Arial", 10, "bold"), command=self._toggle_transcription)
+        self.trans_toggle_btn.pack(side="left", padx=(0,4))
+        ctk.CTkButton(trans_btns, text="💾 Exporter", width=80, height=30,
+                      fg_color="#2a3a2a", hover_color="#1e2e1e",
+                      font=("Arial", 10), command=self._export_transcript).pack(side="left", padx=(0,4))
+        ctk.CTkButton(trans_btns, text="🗑", width=30, height=30,
+                      fg_color="#3a2020", hover_color="#2e1818",
+                      font=("Arial", 10), command=self._clear_transcript).pack(side="left")
 
-        ctk.CTkButton(
-            trans_btns, text="💾 Exporter", width=100, height=30,
-            fg_color="#2a3a2a", hover_color="#1e2e1e",
-            font=("Arial", 10),
-            command=self._export_transcript).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            trans_btns, text="🗑", width=34, height=30,
-            fg_color="#3a2020", hover_color="#2e1818",
-            font=("Arial", 10),
-            command=self._clear_transcript).pack(side="left")
-
-        # ── Bouton Analyser [F-07/F-08] ───────────────────────────────────
         analyze_row = ctk.CTkFrame(self.trans_frame, fg_color="transparent")
-        analyze_row.pack(fill="x", padx=8, pady=(4, 8))
+        analyze_row.pack(fill="x", padx=8, pady=(4,8))
+        ctk.CTkButton(analyze_row, text="🧠 Analyser", width=130, height=30,
+                      fg_color="#2a1a4a", hover_color="#3a2a5a",
+                      font=("Arial", 10, "bold"), command=self._run_analysis).pack(side="left", padx=(0,4))
+        ctk.CTkButton(analyze_row, text="💾 Export analyse", width=120, height=30,
+                      fg_color="#1a2a1a", hover_color="#2a3a2a",
+                      font=("Arial", 10), command=self._export_analysis).pack(side="left")
 
-        ctk.CTkButton(
-            analyze_row,
-            text="🧠 Analyser la réunion",
-            width=180, height=32,
-            fg_color="#2a1a4a", hover_color="#3a2a5a",
-            font=("Arial", 10, "bold"),
-            command=self._run_analysis
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            analyze_row,
-            text="💾 Export",
-            width=70, height=32,
-            fg_color="#1a2a1a", hover_color="#2a3a2a",
-            font=("Arial", 10),
-            command=self._export_analysis
-        ).pack(side="left")
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Construction onglet TRADUCTION (nouvel onglet)
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── Traduction (scrollable aussi) ────────────────────────────────────────
     def _build_tab_traduction(self, parent):
-        self.trad_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.trad_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")  # scrollable
 
-        # Header
         trad_header = ctk.CTkFrame(self.trad_frame, fg_color="#0d1520",
                                     corner_radius=6, border_width=1,
                                     border_color="#1e2d45")
-        trad_header.pack(fill="x", padx=8, pady=(8, 4))
-
+        trad_header.pack(fill="x", padx=8, pady=(8,4))
         h_row1 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row1.pack(fill="x", padx=8, pady=(6, 2))
+        h_row1.pack(fill="x", padx=8, pady=(6,2))
         ctk.CTkLabel(h_row1, text="🌍 Traduction Multilingue",
                      font=("Arial", 11, "bold"), text_color="#4a9abf").pack(side="left")
-        self.trad_status_lbl = ctk.CTkLabel(
-            h_row1, text="⬤ Inactif", font=("Arial", 9), text_color="#444")
+        self.trad_status_lbl = ctk.CTkLabel(h_row1, text="⬤ Inactif", font=("Arial", 9), text_color="#444")
         self.trad_status_lbl.pack(side="right")
-
-        # Langue source
         h_row2 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row2.pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkLabel(h_row2, text="Source :",
-                     font=("Arial", 10), text_color="#888", width=55).pack(side="left")
-        self.trad_src_lbl = ctk.CTkLabel(
-            h_row2, text="— (auto, détectée par Whisper)",
-            font=("Arial", 10), text_color="#7ec88a")
-        self.trad_src_lbl.pack(side="left", padx=(4, 0))
-
-        # Langue cible
+        h_row2.pack(fill="x", padx=8, pady=(2,2))
+        ctk.CTkLabel(h_row2, text="Source :", font=("Arial", 10), text_color="#888", width=55).pack(side="left")
+        self.trad_src_lbl = ctk.CTkLabel(h_row2, text="— (auto, détectée par Whisper)",
+                                         font=("Arial", 10), text_color="#7ec88a")
+        self.trad_src_lbl.pack(side="left", padx=(4,0))
         h_row3 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row3.pack(fill="x", padx=8, pady=(2, 6))
-        ctk.CTkLabel(h_row3, text="Cible :",
-                     font=("Arial", 10), text_color="#888", width=55).pack(side="left")
-
+        h_row3.pack(fill="x", padx=8, pady=(2,6))
+        ctk.CTkLabel(h_row3, text="Cible :", font=("Arial", 10), text_color="#888", width=55).pack(side="left")
         lang_options = []
         if TRANSLATION_AVAILABLE:
             for code, label, flag in SUPPORTED_LANGUAGES:
                 lang_options.append(f"{flag} {label}")
         else:
             lang_options = ["🇫🇷 Français", "🇬🇧 English"]
-
         self._trad_lang_var = tk.StringVar(value="🇫🇷 Français")
         self.trad_lang_menu = ctk.CTkOptionMenu(
             h_row3, variable=self._trad_lang_var,
             values=lang_options, width=140, height=26,
-            font=("Arial", 9),
-            fg_color="#1a2a3a", button_color="#1e3248",
+            font=("Arial", 9), fg_color="#1a2a3a", button_color="#1e3248",
             command=self._on_trad_lang_changed)
-        self.trad_lang_menu.pack(side="left", padx=(4, 6))
-
+        self.trad_lang_menu.pack(side="left", padx=(4,6))
         self.trad_toggle_btn = ctk.CTkButton(
             h_row3, text="▶ Activer", width=70, height=26,
             fg_color="#1a4a6a", hover_color="#143a54",
-            font=("Arial", 9, "bold"),
-            command=self._toggle_translation)
+            font=("Arial", 9, "bold"), command=self._toggle_translation)
         self.trad_toggle_btn.pack(side="left")
 
-        # Zone d'affichage de la traduction
         ctk.CTkLabel(self.trad_frame, text="Texte traduit :",
-                     font=("Arial", 10), text_color="#555").pack(
-            anchor="w", padx=8, pady=(6, 2))
-
-        self.trad_box = ctk.CTkTextbox(
-            self.trad_frame, font=("Arial", 11), wrap="word")
-        self.trad_box.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+                     font=("Arial", 10), text_color="#555").pack(anchor="w", padx=8, pady=(6,2))
+        self.trad_box = ctk.CTkTextbox(self.trad_frame, font=("Arial", 11), wrap="word", height=120)
+        self.trad_box.pack(fill="x", padx=8, pady=(0,4))
         self.trad_box.insert("end", "La traduction apparaîtra ici…\n")
         self.trad_box.configure(text_color="#555")
 
-        # Boutons bas
         trad_btns = ctk.CTkFrame(self.trad_frame, fg_color="transparent")
-        trad_btns.pack(fill="x", padx=8, pady=(0, 8))
+        trad_btns.pack(fill="x", padx=8, pady=(0,8))
         ctk.CTkButton(trad_btns, text="🗑 Effacer", width=80, height=28,
                       fg_color="#2a1a1a", hover_color="#3a2020",
-                      font=("Arial", 9),
-                      command=self._clear_translation).pack(side="left", padx=(0, 4))
+                      font=("Arial", 9), command=self._clear_translation).pack(side="left", padx=(0,4))
         ctk.CTkButton(trad_btns, text="💾 Exporter", width=80, height=28,
                       fg_color="#1a2a1a", hover_color="#2a3a2a",
-                      font=("Arial", 9),
-                      command=self._export_translation).pack(side="left")
+                      font=("Arial", 9), command=self._export_translation).pack(side="left")
+        self.trad_info_lbl = ctk.CTkLabel(self.trad_frame,
+                                          text="ℹ Malagasy : texte original affiché (traduction non disponible offline)",
+                                          font=("Arial", 9), text_color="#555")
+        self.trad_info_lbl.pack(anchor="w", padx=8, pady=(0,4))
 
-        # Info Malagasy
-        self.trad_info_lbl = ctk.CTkLabel(
-            self.trad_frame,
-            text="ℹ Malagasy : texte original affiché (traduction non disponible offline)",
-            font=("Arial", 9), text_color="#555")
-        self.trad_info_lbl.pack(anchor="w", padx=8, pady=(0, 4))
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Construction onglet RAPPORT
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── Rapport ──────────────────────────────────────────────────────────────
     def _build_tab_rapport(self, parent):
         self.rapport_frame = ctk.CTkFrame(parent, fg_color="transparent")
 
         ctk.CTkLabel(self.rapport_frame, text="📊 Génération de Rapport",
-                     font=("Arial", 12, "bold"), text_color="#4a9abf").pack(
-            anchor="w", padx=10, pady=(10, 6))
-
-        # Config template
+                     font=("Arial", 12, "bold"), text_color="#4a9abf").pack(anchor="w", padx=10, pady=(10,6))
         cfg_frame = ctk.CTkFrame(self.rapport_frame, fg_color="#0d1520",
-                                  corner_radius=6, border_width=1,
-                                  border_color="#1e2d45")
-        cfg_frame.pack(fill="x", padx=8, pady=(0, 6))
-
+                                  corner_radius=6, border_width=1, border_color="#1e2d45")
+        cfg_frame.pack(fill="x", padx=8, pady=(0,6))
         r1 = ctk.CTkFrame(cfg_frame, fg_color="transparent")
-        r1.pack(fill="x", padx=8, pady=(6, 2))
-        ctk.CTkLabel(r1, text="Template :", font=("Arial", 10),
-                     text_color="#888", width=70).pack(side="left")
+        r1.pack(fill="x", padx=8, pady=(6,2))
+        ctk.CTkLabel(r1, text="Template :", font=("Arial", 10), text_color="#888", width=70).pack(side="left")
         self._report_template_var = tk.StringVar(value="Direction")
         ctk.CTkOptionMenu(r1, variable=self._report_template_var,
-                          values=["Direction", "RH", "Commercial", "Technique"],
+                          values=["Direction","RH","Commercial","Technique"],
                           width=130, height=24, font=("Arial", 9),
-                          fg_color="#1a2a3a", button_color="#1e3248"
-                          ).pack(side="left", padx=(4, 0))
-
+                          fg_color="#1a2a3a", button_color="#1e3248").pack(side="left", padx=(4,0))
         r2 = ctk.CTkFrame(cfg_frame, fg_color="transparent")
-        r2.pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkLabel(r2, text="Niveau :", font=("Arial", 10),
-                     text_color="#888", width=70).pack(side="left")
+        r2.pack(fill="x", padx=8, pady=(2,2))
+        ctk.CTkLabel(r2, text="Niveau :", font=("Arial", 10), text_color="#888", width=70).pack(side="left")
         self._report_detail_var = tk.StringVar(value="standard")
         ctk.CTkOptionMenu(r2, variable=self._report_detail_var,
-                          values=["resume", "standard", "complet"],
+                          values=["resume","standard","complet"],
                           width=130, height=24, font=("Arial", 9),
-                          fg_color="#1a2a3a", button_color="#1e3248"
-                          ).pack(side="left", padx=(4, 0))
-
+                          fg_color="#1a2a3a", button_color="#1e3248").pack(side="left", padx=(4,0))
         r3 = ctk.CTkFrame(cfg_frame, fg_color="transparent")
-        r3.pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkLabel(r3, text="Titre :", font=("Arial", 10),
-                     text_color="#888", width=70).pack(side="left")
-        self.report_title_entry = ctk.CTkEntry(
-            r3, placeholder_text="Compte-rendu de réunion",
-            width=150, height=24, font=("Arial", 9))
-        self.report_title_entry.pack(side="left", padx=(4, 0))
-
+        r3.pack(fill="x", padx=8, pady=(2,2))
+        ctk.CTkLabel(r3, text="Titre :", font=("Arial", 10), text_color="#888", width=70).pack(side="left")
+        self.report_title_entry = ctk.CTkEntry(r3, placeholder_text="Compte-rendu de réunion",
+                                               width=150, height=24, font=("Arial", 9))
+        self.report_title_entry.pack(side="left", padx=(4,0))
         r4 = ctk.CTkFrame(cfg_frame, fg_color="transparent")
-        r4.pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkLabel(r4, text="Société :", font=("Arial", 10),
-                     text_color="#888", width=70).pack(side="left")
-        self.report_company_entry = ctk.CTkEntry(
-            r4, placeholder_text="PolyMeet",
-            width=150, height=24, font=("Arial", 9))
-        self.report_company_entry.pack(side="left", padx=(4, 0))
-
+        r4.pack(fill="x", padx=8, pady=(2,2))
+        ctk.CTkLabel(r4, text="Société :", font=("Arial", 10), text_color="#888", width=70).pack(side="left")
+        self.report_company_entry = ctk.CTkEntry(r4, placeholder_text="PolyMeet",
+                                                 width=150, height=24, font=("Arial", 9))
+        self.report_company_entry.pack(side="left", padx=(4,0))
         r5 = ctk.CTkFrame(cfg_frame, fg_color="transparent")
-        r5.pack(fill="x", padx=8, pady=(2, 6))
-        ctk.CTkLabel(r5, text="MDP PDF :", font=("Arial", 10),
-                     text_color="#888", width=70).pack(side="left")
-        self.report_pwd_entry = ctk.CTkEntry(
-            r5, placeholder_text="(optionnel)",
-            width=150, height=24, font=("Arial", 9), show="*")
-        self.report_pwd_entry.pack(side="left", padx=(4, 0))
+        r5.pack(fill="x", padx=8, pady=(2,6))
+        ctk.CTkLabel(r5, text="MDP PDF :", font=("Arial", 10), text_color="#888", width=70).pack(side="left")
+        self.report_pwd_entry = ctk.CTkEntry(r5, placeholder_text="(optionnel)",
+                                             width=150, height=24, font=("Arial", 9), show="*")
+        self.report_pwd_entry.pack(side="left", padx=(4,0))
 
-        # Sections à inclure
         ctk.CTkLabel(self.rapport_frame, text="Sections :",
-                     font=("Arial", 10), text_color="#888").pack(
-            anchor="w", padx=10, pady=(4, 2))
-
-        sec_frame = ctk.CTkFrame(self.rapport_frame, fg_color="#0d1520",
-                                  corner_radius=6)
-        sec_frame.pack(fill="x", padx=8, pady=(0, 6))
-
+                     font=("Arial", 10), text_color="#888").pack(anchor="w", padx=10, pady=(4,2))
+        sec_frame = ctk.CTkFrame(self.rapport_frame, fg_color="#0d1520", corner_radius=6)
+        sec_frame.pack(fill="x", padx=8, pady=(0,6))
         self._section_vars = {}
         sections_labels = [
-            ("page_garde",      "📄 Page de garde"),
-            ("participants",    "👥 Participants"),
+            ("page_garde", "📄 Page de garde"),
+            ("participants", "👥 Participants"),
             ("resume_executif", "📋 Résumé exécutif"),
-            ("decisions",       "✅ Décisions"),
-            ("taches",          "📌 Tâches"),
-            ("transcription",   "📝 Transcription"),
-            ("prochaines_etapes","🔜 Prochaines étapes"),
+            ("decisions", "✅ Décisions"),
+            ("taches", "📌 Tâches"),
+            ("transcription", "📝 Transcription"),
+            ("prochaines_etapes", "🔜 Prochaines étapes"),
         ]
         for key, label in sections_labels:
             var = tk.BooleanVar(value=(key != "transcription"))
             self._section_vars[key] = var
-            cb = ctk.CTkCheckBox(sec_frame, text=label, variable=var,
-                                  font=("Arial", 9), height=22)
-            cb.pack(anchor="w", padx=10, pady=1)
+            ctk.CTkCheckBox(sec_frame, text=label, variable=var,
+                            font=("Arial", 9), height=22).pack(anchor="w", padx=10, pady=1)
 
-        # Boutons génération
-        self.report_status_lbl = ctk.CTkLabel(
-            self.rapport_frame, text="",
-            font=("Arial", 9), text_color="#4a9abf")
-        self.report_status_lbl.pack(anchor="w", padx=10, pady=(4, 2))
-
+        self.report_status_lbl = ctk.CTkLabel(self.rapport_frame, text="",
+                                              font=("Arial", 9), text_color="#4a9abf")
+        self.report_status_lbl.pack(anchor="w", padx=10, pady=(4,2))
         gen_row = ctk.CTkFrame(self.rapport_frame, fg_color="transparent")
-        gen_row.pack(fill="x", padx=8, pady=(0, 4))
+        gen_row.pack(fill="x", padx=8, pady=(0,4))
+        ctk.CTkButton(gen_row, text="📄 Word", width=70, height=30,
+                      fg_color="#1a3a6a", command=self._generate_word).pack(side="left", padx=(0,4))
+        ctk.CTkButton(gen_row, text="📑 PDF", width=70, height=30,
+                      fg_color="#4a1a1a", command=self._generate_pdf).pack(side="left", padx=(0,4))
+        ctk.CTkButton(gen_row, text="📄+📑 Les deux", width=100, height=30,
+                      fg_color="#1a3a2a", command=self._generate_both).pack(side="left")
 
-        ctk.CTkButton(gen_row, text="📄 Word",
-                      width=70, height=30,
-                      fg_color="#1a3a6a", hover_color="#142c52",
-                      font=("Arial", 9, "bold"),
-                      command=self._generate_word).pack(side="left", padx=(0, 4))
-
-        ctk.CTkButton(gen_row, text="📑 PDF",
-                      width=70, height=30,
-                      fg_color="#4a1a1a", hover_color="#3a1414",
-                      font=("Arial", 9, "bold"),
-                      command=self._generate_pdf).pack(side="left", padx=(0, 4))
-
-        ctk.CTkButton(gen_row, text="📄+📑 Les deux",
-                      width=100, height=30,
-                      fg_color="#1a3a2a", hover_color="#142c20",
-                      font=("Arial", 9, "bold"),
-                      command=self._generate_both).pack(side="left")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # [F-02] Panneau d'enregistrement (bas de fenêtre)
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── Enregistrement ──────────────────────────────────────────────────────
     def _build_recording_panel(self):
-        """Construit le panneau F-02 Contrôle de l'Enregistrement."""
-        rec_panel = ctk.CTkFrame(
-            self, height=62, fg_color="#0e1520",
-            corner_radius=0,
-            border_width=1, border_color="#1e2d45")
+        rec_panel = ctk.CTkFrame(self, height=62, fg_color="#0e1520",
+                                 corner_radius=0, border_width=1, border_color="#1e2d45")
         rec_panel.pack(fill="x", side="bottom")
         rec_panel.pack_propagate(False)
-
-        # ── Étiquette section ────────────────────────────────────────────
-        ctk.CTkLabel(
-            rec_panel, text="⏺  ENREGISTREMENT",
-            font=("Arial", 10, "bold"), text_color="#4a7abf"
-        ).pack(side="left", padx=(14, 10))
-
-        # ── Bouton START ─────────────────────────────────────────────────
-        self.rec_start_btn = ctk.CTkButton(
-            rec_panel,
-            text="▶  Démarrer", width=118, height=36,
-            fg_color="#1a6b3a", hover_color="#145430",
-            font=("Arial", 11, "bold"),
-            command=self._rec_start)
-        self.rec_start_btn.pack(side="left", padx=(0, 6), pady=12)
-
-        # ── Bouton PAUSE / REPRENDRE ─────────────────────────────────────
-        self.rec_pause_btn = ctk.CTkButton(
-            rec_panel,
-            text="⏸  Pause", width=110, height=36,
-            fg_color="#555", hover_color="#666",
-            font=("Arial", 11, "bold"),
-            command=self._rec_pause_resume,
-            state="disabled")
-        self.rec_pause_btn.pack(side="left", padx=(0, 6), pady=12)
-
-        # ── Bouton STOP ──────────────────────────────────────────────────
-        self.rec_stop_btn = ctk.CTkButton(
-            rec_panel,
-            text="⏹  Arrêter", width=110, height=36,
-            fg_color="#7a2020", hover_color="#5e1818",
-            font=("Arial", 11, "bold"),
-            command=self._rec_stop,
-            state="disabled")
-        self.rec_stop_btn.pack(side="left", padx=(0, 14), pady=12)
-
-        # ── Séparateur ───────────────────────────────────────────────────
+        ctk.CTkLabel(rec_panel, text="⏺  ENREGISTREMENT",
+                     font=("Arial", 10, "bold"), text_color="#4a7abf").pack(side="left", padx=(14,10))
+        self.rec_start_btn = ctk.CTkButton(rec_panel, text="▶  Démarrer", width=118, height=36,
+                                           fg_color="#1a6b3a", hover_color="#145430",
+                                           font=("Arial", 11, "bold"), command=self._rec_start)
+        self.rec_start_btn.pack(side="left", padx=(0,6), pady=12)
+        self.rec_pause_btn = ctk.CTkButton(rec_panel, text="⏸  Pause", width=110, height=36,
+                                           fg_color="#555", hover_color="#666",
+                                           font=("Arial", 11, "bold"), command=self._rec_pause_resume,
+                                           state="disabled")
+        self.rec_pause_btn.pack(side="left", padx=(0,6), pady=12)
+        self.rec_stop_btn = ctk.CTkButton(rec_panel, text="⏹  Arrêter", width=110, height=36,
+                                          fg_color="#7a2020", hover_color="#5e1818",
+                                          font=("Arial", 11, "bold"), command=self._rec_stop,
+                                          state="disabled")
+        self.rec_stop_btn.pack(side="left", padx=(0,14), pady=12)
         sep = ctk.CTkFrame(rec_panel, width=2, height=36, fg_color="#1e2d45")
-        sep.pack(side="left", padx=(0, 14))
-
-        # ── Indicateur statut ────────────────────────────────────────────
-        self.rec_status_dot = ctk.CTkLabel(
-            rec_panel, text="⬤",
-            font=("Arial", 14), text_color="#333")
-        self.rec_status_dot.pack(side="left", padx=(0, 4))
-
-        self.rec_status_lbl = ctk.CTkLabel(
-            rec_panel, text="Inactif",
-            font=("Arial", 11), text_color="#555")
-        self.rec_status_lbl.pack(side="left", padx=(0, 16))
-
-        # ── Durée en temps réel ──────────────────────────────────────────
-        ctk.CTkLabel(
-            rec_panel, text="⏱",
-            font=("Arial", 13)).pack(side="left", padx=(0, 4))
-
-        self.rec_duration_lbl = ctk.CTkLabel(
-            rec_panel, text="00:00",
-            font=("Arial", 14, "bold"), text_color="#4a7abf")
-        self.rec_duration_lbl.pack(side="left", padx=(0, 16))
-
-        # ── Autosave indicator ───────────────────────────────────────────
-        self.rec_autosave_lbl = ctk.CTkLabel(
-            rec_panel, text="",
-            font=("Arial", 10), text_color="#4a9a4a")
-        self.rec_autosave_lbl.pack(side="left", padx=(0, 10))
-
-        # ── Raccourcis hint ──────────────────────────────────────────────
-        ctk.CTkLabel(
-            rec_panel,
-            text="Ctrl+R  Démarrer   Ctrl+P  Pause   Ctrl+S  Arrêter",
-            font=("Arial", 9), text_color="#333"
-        ).pack(side="right", padx=14)
+        sep.pack(side="left", padx=(0,14))
+        self.rec_status_dot = ctk.CTkLabel(rec_panel, text="⬤", font=("Arial", 14), text_color="#333")
+        self.rec_status_dot.pack(side="left", padx=(0,4))
+        self.rec_status_lbl = ctk.CTkLabel(rec_panel, text="Inactif", font=("Arial", 11), text_color="#555")
+        self.rec_status_lbl.pack(side="left", padx=(0,16))
+        ctk.CTkLabel(rec_panel, text="⏱", font=("Arial", 13)).pack(side="left", padx=(0,4))
+        self.rec_duration_lbl = ctk.CTkLabel(rec_panel, text="00:00", font=("Arial", 14, "bold"),
+                                            text_color="#4a7abf")
+        self.rec_duration_lbl.pack(side="left", padx=(0,16))
+        self.rec_autosave_lbl = ctk.CTkLabel(rec_panel, text="", font=("Arial", 10), text_color="#4a9a4a")
+        self.rec_autosave_lbl.pack(side="left", padx=(0,10))
+        ctk.CTkLabel(rec_panel, text="Ctrl+R  Démarrer   Ctrl+P  Pause   Ctrl+S  Arrêter",
+                     font=("Arial", 9), text_color="#333").pack(side="right", padx=14)
 
     # ──────────────────────────────────────────────────────────────────────────
     # [F-02] Actions d'enregistrement

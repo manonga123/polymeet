@@ -21,3 +21,5 @@ python install_languages.py
 pip install asteroid-filterbanks einops lightning matplotlib importlib_metadata hf_xet tokenizers accelerate transformers sentencepiece sacremoses huggingface_hub
 python -c "from transformers import MarianMTModel, MarianTokenizer; MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-mg-en'); MarianMTModel.from_pretrained('Helsinki-NLP/opus-mt-mg-en'); print('MG→EN OK')"
 python -c "from transformers import MarianMTModel, MarianTokenizer; MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-mg'); MarianMTModel.from_pretrained('Helsinki-NLP/opus-mt-en-mg'); print('EN→MG OK')"
+
+pip install deepgram-sdk==3.*

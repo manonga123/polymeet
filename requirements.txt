@@ -3,4 +3,4 @@ darkdetect==0.8.0
 future==1.0.0
 packaging==26.0
 
-deepgram
+deepgram-sdk

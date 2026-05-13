@@ -120,7 +120,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ─── Paramètres réseau ──────────────────────────────────────────────────────
-DROIDCAM_IP   = "192.168.O.14"
+DROIDCAM_IP   = "192.168.0.42"
 DROIDCAM_PORT = 4747
 SERVER_IP     = "192.168.56.1"
 SERVER_PORT   = 9765
@@ -1174,6 +1174,13 @@ class VideoCallApp(ctk.CTk):
                 self.ws.send(json.dumps({"type": "audio", "chunk": b64_chunk})),
                 self.loop)
 
+    def _on_record_chunk_and_transcribe(self, raw_bytes: bytes):
+        self.recording_engine.add_chunk(raw_bytes)
+        if self.transcription_engine and self.transcription_engine.is_running:
+            whisper_chunk = self.audio_engine.resample_to_whisper(raw_bytes)
+            if whisper_chunk:
+                self.transcription_engine.feed(whisper_chunk)
+
     # ──────────────────────────────────────────────────────────────────────────
     # [F-01] Sélecteur de microphone
     # ──────────────────────────────────────────────────────────────────────────
@@ -1451,13 +1458,16 @@ class VideoCallApp(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────────────
     # [F-03] Méthodes de transcription
     # ──────────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────────
+    # [F-03] Méthodes de transcription
+    # ──────────────────────────────────────────────────────────────────────────
     def _toggle_transcription(self):
+        print("[DEBUG] _toggle_transcription appelée !")
         if not TRANSCRIPTION_AVAILABLE:
             msgbox.showerror("Module manquant", "transcription_engine.py introuvable.")
             return
 
         if self.transcription_engine is None:
-            # Initialisation avec callback vers la mise à jour UI
             self.transcription_engine = TranscriptionEngine(
                 on_transcript_segment=self._on_transcript_segment,
             )
@@ -1466,42 +1476,46 @@ class VideoCallApp(ctk.CTk):
                 self.trans_toggle_btn.configure(text="⏹ Désactiver", fg_color="#6a1a1a")
                 self.trans_status_lbl.configure(text="⬤ Actif", text_color="#4caf50")
                 self._add_chat_line("📝 Transcription activée (Whisper)")
+
+                if TRANSLATION_AVAILABLE:
+                    target_code = self._get_selected_target_lang()
+                    self.translation_engine = TranslationEngine(
+                        on_translated=self._on_translated
+                    )
+                    self.translation_engine.start(source_lang="auto", target_lang=target_code)
+                    self.trad_status_lbl.configure(text="⬤ Actif", text_color="#4caf50")
         else:
-            self.transcription_engine.stop()
+            if self.transcription_engine:
+                self.transcription_engine.stop()
             self.transcription_engine = None
             self.trans_toggle_btn.configure(text="▶ Activer", fg_color="#1a4a6a")
             self.trans_status_lbl.configure(text="⬤ Inactif", text_color="#444")
 
-    # Dans client.py (méthode _on_record_chunk_and_transcribe)
-    def _on_record_chunk_and_transcribe(self, raw_bytes: bytes):
-        self.recording_engine.add_chunk(raw_bytes)
+            if self.translation_engine:
+                self.translation_engine.stop()
+                self.translation_engine = None
+                self.trad_status_lbl.configure(text="⬤ Inactif", text_color="#444")
 
-        if self.transcription_engine and self.transcription_engine.is_running:
-            whisper_chunk = self.audio_engine.resample_to_whisper(raw_bytes)
-            if whisper_chunk:  # Sécurité : ne pas envoyer si vide
-                self.transcription_engine.feed(whisper_chunk)
+
 
     def _on_transcript_segment(self, text, language, timestamp, speaker_label="?", speaker_color="#aaa"):
         def _update_ui():
-            # Mise à jour du libellé de langue détectée
             self.trans_lang_lbl.configure(text=f"Langue: {language.upper()}")
-
-            # Configuration du tag de couleur pour le speaker
             tag_name = f"spk_{speaker_label}"
             self.trans_box.tag_config(tag_name, foreground=speaker_color)
-
-            # Insertion dans la zone de texte
             self.trans_box.configure(state="normal")
             self.trans_box.insert("end", f"[{timestamp}] ", "gray_tag")
             self.trans_box.insert("end", f"{speaker_label}: ", tag_name)
             self.trans_box.insert("end", f"{text}\n")
             self.trans_box.see("end")
             self.trans_box.configure(state="disabled")
-
-            # Sauvegarde pour le module de rapport (F-09)
             self._transcript_entries.append({
                 "time": timestamp, "text": text, "speaker": speaker_label
             })
+
+            # ← AJOUTER : envoyer à la traduction
+            if self.translation_engine and self.translation_engine.is_ready:
+                self.translation_engine.translate(text, source_lang=language)
 
         self.after(0, _update_ui)
 
@@ -1525,11 +1539,35 @@ class VideoCallApp(ctk.CTk):
 
     def _clear_transcript(self):
         if msgbox.askyesno("Effacer", "Effacer toute la transcription ?"):
+            self.trans_box.configure(state="normal")
             self.trans_box.delete("1.0", "end")
+            self.trans_box.configure(state="disabled")
             if self.transcription_engine:
                 self.transcription_engine.clear_transcript()
             self.trans_lang_lbl.configure(text="—")
             self._transcript_entries.clear()
+
+    def _get_selected_target_lang(self) -> str:
+        """Récupère le code langue depuis le menu déroulant."""
+        selected = self._trad_lang_var.get()
+        for code, label, flag in SUPPORTED_LANGUAGES:
+            if label in selected or flag in selected:
+                return code
+        return "fr"
+
+    def _on_translated(self, original, translated, src_lang, tgt_lang):
+        """Callback appelé quand une traduction est prête."""
+        def update():
+            try:
+                src_name = LANG_NAMES.get(src_lang, src_lang)
+                self.trad_src_lbl.configure(text=f"{src_name} (auto-détecté)")
+                self.trad_box.configure(state="normal")
+                self.trad_box.insert("end", f"{translated}\n")
+                self.trad_box.see("end")
+                self.trad_box.configure(state="disabled")
+            except Exception:
+                pass
+        self.after(0, update)
 
     # ──────────────────────────────────────────────────────────────────────────
     # [F-04] Diarisation — gestion des speakers
@@ -1859,8 +1897,10 @@ class VideoCallApp(ctk.CTk):
         self._generate_word()
         self._generate_pdf()
 
-    def on_closing(self):
+    def on_closing(self):        # ← 4 espaces (dans la classe)
         self._leave()
+        if self.audio_engine:
+            self.audio_engine.stop()
         self.destroy()
 
 

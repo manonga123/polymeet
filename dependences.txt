@@ -23,3 +23,4 @@ python -c "from transformers import MarianMTModel, MarianTokenizer; MarianTokeni
 python -c "from transformers import MarianMTModel, MarianTokenizer; MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-mg'); MarianMTModel.from_pretrained('Helsinki-NLP/opus-mt-en-mg'); print('EN→MG OK')"
 
 pip install deepgram-sdk==3.*
+pip install google-generativeai

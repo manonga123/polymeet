@@ -566,6 +566,7 @@ class VideoCallApp(ctk.CTk):
         self.transcription_engine = None
         self.diarization_engine   = None
         self.translation_engine   = None
+        self._pending_translation_meta = {}
         self.analysis_engine      = AnalysisEngine() if ANALYSIS_AVAILABLE else None
         self.report_engine        = ReportEngine()   if REPORT_AVAILABLE   else None
         self._last_analysis       = None
@@ -580,7 +581,7 @@ class VideoCallApp(ctk.CTk):
         self.bind("<Control-r>", lambda e: self._rec_start())
         self.bind("<Control-p>", lambda e: self._rec_pause_resume())
         self.bind("<Control-s>", lambda e: self._rec_stop())
-
+        
     # ── UI ───────────────────────────────────────────────────────────────────
     def _build_ui(self):
         topbar = ctk.CTkFrame(self, height=52, fg_color="#161b22", corner_radius=0)
@@ -779,67 +780,92 @@ class VideoCallApp(ctk.CTk):
                       font=("Arial", 10), command=self._export_analysis).pack(side="left")
 
     # ── Traduction (scrollable aussi) ────────────────────────────────────────
+    # ── Traduction ────────────────────────────────────────────────────────────────
     def _build_tab_traduction(self, parent):
-        self.trad_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")  # scrollable
-
+        self.trad_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+    
         trad_header = ctk.CTkFrame(self.trad_frame, fg_color="#0d1520",
                                     corner_radius=6, border_width=1,
                                     border_color="#1e2d45")
-        trad_header.pack(fill="x", padx=8, pady=(8,4))
+        trad_header.pack(fill="x", padx=8, pady=(8, 4))
+    
+        # Ligne 1 : titre + statut
         h_row1 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row1.pack(fill="x", padx=8, pady=(6,2))
-        ctk.CTkLabel(h_row1, text="🌍 Traduction Multilingue",
-                     font=("Arial", 11, "bold"), text_color="#4a9abf").pack(side="left")
-        self.trad_status_lbl = ctk.CTkLabel(h_row1, text="⬤ Inactif", font=("Arial", 9), text_color="#444")
+        h_row1.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(h_row1, text="🌍 Traduction — Gemini 2.5 Flash",
+                    font=("Arial", 11, "bold"), text_color="#4a9abf").pack(side="left")
+        self.trad_status_lbl = ctk.CTkLabel(
+            h_row1, text="⬤ Inactif", font=("Arial", 9), text_color="#444")
         self.trad_status_lbl.pack(side="right")
+    
+        # Ligne 2 : langue source détectée
         h_row2 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row2.pack(fill="x", padx=8, pady=(2,2))
-        ctk.CTkLabel(h_row2, text="Source :", font=("Arial", 10), text_color="#888", width=55).pack(side="left")
-        self.trad_src_lbl = ctk.CTkLabel(h_row2, text="— (auto, détectée par Whisper)",
-                                         font=("Arial", 10), text_color="#7ec88a")
-        self.trad_src_lbl.pack(side="left", padx=(4,0))
+        h_row2.pack(fill="x", padx=8, pady=(2, 2))
+        ctk.CTkLabel(h_row2, text="Source :", font=("Arial", 10),
+                    text_color="#888", width=55).pack(side="left")
+        self.trad_src_lbl = ctk.CTkLabel(
+            h_row2, text="— (auto, détectée par Deepgram)",
+            font=("Arial", 10), text_color="#7ec88a")
+        self.trad_src_lbl.pack(side="left", padx=(4, 0))
+    
+        # Ligne 3 : sélecteur langue cible + bouton Activer
         h_row3 = ctk.CTkFrame(trad_header, fg_color="transparent")
-        h_row3.pack(fill="x", padx=8, pady=(2,6))
-        ctk.CTkLabel(h_row3, text="Cible :", font=("Arial", 10), text_color="#888", width=55).pack(side="left")
+        h_row3.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(h_row3, text="Cible :", font=("Arial", 10),
+                    text_color="#888", width=55).pack(side="left")
+    
         lang_options = []
         if TRANSLATION_AVAILABLE:
             for code, label, flag in SUPPORTED_LANGUAGES:
                 lang_options.append(f"{flag} {label}")
         else:
             lang_options = ["🇫🇷 Français", "🇬🇧 English"]
+    
         self._trad_lang_var = tk.StringVar(value="🇫🇷 Français")
         self.trad_lang_menu = ctk.CTkOptionMenu(
             h_row3, variable=self._trad_lang_var,
-            values=lang_options, width=140, height=26,
+            values=lang_options, width=160, height=28,
             font=("Arial", 9), fg_color="#1a2a3a", button_color="#1e3248",
             command=self._on_trad_lang_changed)
-        self.trad_lang_menu.pack(side="left", padx=(4,6))
+        self.trad_lang_menu.pack(side="left", padx=(4, 6))
+    
+        # ← BOUTON ACTIVER/DÉSACTIVER (indépendant de la transcription)
         self.trad_toggle_btn = ctk.CTkButton(
-            h_row3, text="▶ Activer", width=70, height=26,
+            h_row3, text="▶ Activer", width=90, height=28,
             fg_color="#1a4a6a", hover_color="#143a54",
             font=("Arial", 9, "bold"), command=self._toggle_translation)
         self.trad_toggle_btn.pack(side="left")
-
+    
+        # Info API
+        ctk.CTkLabel(self.trad_frame,
+                    text="ℹ  Traduit les phrases de la Transcription via Gemini 2.5 Flash (internet requis)",
+                    font=("Arial", 9), text_color="#555").pack(
+            anchor="w", padx=8, pady=(4, 2))
+    
+        # Zone de texte traduit
         ctk.CTkLabel(self.trad_frame, text="Texte traduit :",
-                     font=("Arial", 10), text_color="#555").pack(anchor="w", padx=8, pady=(6,2))
-        self.trad_box = ctk.CTkTextbox(self.trad_frame, font=("Arial", 11), wrap="word", height=120)
-        self.trad_box.pack(fill="x", padx=8, pady=(0,4))
-        self.trad_box.insert("end", "La traduction apparaîtra ici…\n")
-        self.trad_box.configure(text_color="#555")
-
+                    font=("Arial", 10), text_color="#555").pack(
+            anchor="w", padx=8, pady=(6, 2))
+        self.trad_box = ctk.CTkTextbox(
+            self.trad_frame, font=("Arial", 11), wrap="word", height=280)
+        self.trad_box.pack(fill="x", padx=8, pady=(0, 4))
+        self.trad_box.insert("end", "Activez la traduction pour voir les phrases traduites ici…\n")
+        self.trad_box.configure(text_color="#555", state="disabled")
+    
+        # Boutons d'action
         trad_btns = ctk.CTkFrame(self.trad_frame, fg_color="transparent")
-        trad_btns.pack(fill="x", padx=8, pady=(0,8))
+        trad_btns.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkButton(trad_btns, text="🗑 Effacer", width=80, height=28,
-                      fg_color="#2a1a1a", hover_color="#3a2020",
-                      font=("Arial", 9), command=self._clear_translation).pack(side="left", padx=(0,4))
+                    fg_color="#2a1a1a", hover_color="#3a2020",
+                    font=("Arial", 9), command=self._clear_translation).pack(
+            side="left", padx=(0, 4))
         ctk.CTkButton(trad_btns, text="💾 Exporter", width=80, height=28,
-                      fg_color="#1a2a1a", hover_color="#2a3a2a",
-                      font=("Arial", 9), command=self._export_translation).pack(side="left")
-        self.trad_info_lbl = ctk.CTkLabel(self.trad_frame,
-                                          text="ℹ Malagasy : texte original affiché (traduction non disponible offline)",
-                                          font=("Arial", 9), text_color="#555")
-        self.trad_info_lbl.pack(anchor="w", padx=8, pady=(0,4))
-
+                    fg_color="#1a2a1a", hover_color="#2a3a2a",
+                    font=("Arial", 9), command=self._export_translation).pack(
+            side="left")
+        self.trad_info_lbl = ctk.CTkLabel(
+            trad_btns, text="", font=("Arial", 9), text_color="#4a9abf")
+        self.trad_info_lbl.pack(side="right", padx=(0, 4))
     # ── Rapport ──────────────────────────────────────────────────────────────
     def _build_tab_rapport(self, parent):
         self.rapport_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1467,7 +1493,9 @@ class VideoCallApp(ctk.CTk):
             msgbox.showerror("Module manquant", "transcription_engine.py introuvable.")
             return
 
+        # Toggle transcription
         if self.transcription_engine is None:
+            # Start transcription
             self.transcription_engine = TranscriptionEngine(
                 on_transcript_segment=self._on_transcript_segment,
             )
@@ -1475,31 +1503,36 @@ class VideoCallApp(ctk.CTk):
             if ok:
                 self.trans_toggle_btn.configure(text="⏹ Désactiver", fg_color="#6a1a1a")
                 self.trans_status_lbl.configure(text="⬤ Actif", text_color="#4caf50")
-                self._add_chat_line("📝 Transcription activée (Whisper)")
-
-                if TRANSLATION_AVAILABLE:
-                    target_code = self._get_selected_target_lang()
-                    self.translation_engine = TranslationEngine(
-                        on_translated=self._on_translated
-                    )
-                    self.translation_engine.start(source_lang="auto", target_lang=target_code)
-                    self.trad_status_lbl.configure(text="⬤ Actif", text_color="#4caf50")
+                # Choose label depending on backend if available
+                label = "📝 Transcription activée (Deepgram)"
+                if hasattr(self.transcription_engine, "backend") and getattr(self.transcription_engine, "backend") == "whisper":
+                    label = "📝 Transcription activée (Whisper)"
+                self._add_chat_line(label)
+                # Do not auto-start translation here; user must activate it separately
         else:
-            if self.transcription_engine:
+            # Stop transcription
+            try:
                 self.transcription_engine.stop()
+            except Exception:
+                pass
             self.transcription_engine = None
             self.trans_toggle_btn.configure(text="▶ Activer", fg_color="#1a4a6a")
             self.trans_status_lbl.configure(text="⬤ Inactif", text_color="#444")
-
-            if self.translation_engine:
-                self.translation_engine.stop()
+            self._add_chat_line("📝 Transcription désactivée")
+            # If translation was running linked to transcription, stop it
+            if getattr(self, "translation_engine", None):
+                try:
+                    self.translation_engine.stop()
+                except Exception:
+                    pass
                 self.translation_engine = None
                 self.trad_status_lbl.configure(text="⬤ Inactif", text_color="#444")
 
 
 
-    def _on_transcript_segment(self, text, language, timestamp, speaker_label="?", speaker_color="#aaa"):
+    def _on_transcript_segment(self, text, language, timestamp,speaker_label="?", speaker_color="#aaa"):
         def _update_ui():
+            # ── Mise à jour de la boîte de transcription ──────────────────────
             self.trans_lang_lbl.configure(text=f"Langue: {language.upper()}")
             tag_name = f"spk_{speaker_label}"
             self.trans_box.tag_config(tag_name, foreground=speaker_color)
@@ -1512,11 +1545,28 @@ class VideoCallApp(ctk.CTk):
             self._transcript_entries.append({
                 "time": timestamp, "text": text, "speaker": speaker_label
             })
-
-            # ← AJOUTER : envoyer à la traduction
+    
+            # ── Envoi à la traduction si active ───────────────────────────────
             if self.translation_engine and self.translation_engine.is_ready:
-                self.translation_engine.translate(text, source_lang=language)
-
+                # Mettre à jour la langue source détectée
+                if language not in ("?", None, ""):
+                    self.translation_engine.set_source_language(language)
+                    src_name = LANG_NAMES.get(language, language.upper())
+                    self.trad_src_lbl.configure(
+                        text=f"{src_name} (auto-détecté)")
+    
+                # Passer timestamp et speaker pour l'affichage côté traduction
+                self.translation_engine.translate(
+                    text,
+                    source_lang=language,
+                )
+                # Stocker les métadonnées du segment en cours
+                self._pending_translation_meta = {
+                    "timestamp": timestamp,
+                    "speaker":   speaker_label,
+                    "color":     speaker_color,
+                }
+        
         self.after(0, _update_ui)
 
     def _export_transcript(self):
@@ -1555,18 +1605,39 @@ class VideoCallApp(ctk.CTk):
                 return code
         return "fr"
 
+    
     def _on_translated(self, original, translated, src_lang, tgt_lang):
-        """Callback appelé quand une traduction est prête."""
+        """Callback appelé par TranslationEngine quand une traduction est prête."""
         def update():
             try:
-                src_name = LANG_NAMES.get(src_lang, src_lang)
+                # Récupérer les métadonnées du segment (timestamp + speaker)
+                meta = getattr(self, "_pending_translation_meta", {})
+                timestamp     = meta.get("timestamp", "")
+                speaker_label = meta.get("speaker", "?")
+                speaker_color = meta.get("color", "#aaaaaa")
+ 
+                src_name = LANG_NAMES.get(src_lang, src_lang.upper()
+                            if src_lang not in ("auto", "?", None) else "?")
                 self.trad_src_lbl.configure(text=f"{src_name} (auto-détecté)")
+ 
+                tag_name = f"trad_spk_{speaker_label}"
+                self.trad_box.tag_config(tag_name, foreground=speaker_color)
                 self.trad_box.configure(state="normal")
+ 
+                if timestamp:
+                    self.trad_box.insert("end", f"[{timestamp}] ", "gray_tag")
+                self.trad_box.insert("end", f"{speaker_label}: ", tag_name)
                 self.trad_box.insert("end", f"{translated}\n")
                 self.trad_box.see("end")
                 self.trad_box.configure(state="disabled")
-            except Exception:
-                pass
+ 
+                # Notifier si l'onglet traduction n'est pas visible
+                if self._active_tab.get() == "chat":
+                    self.tab_trad_btn.configure(text="🌍 Traduction ●")
+ 
+            except Exception as e:
+                print(f"[Translation UI] Erreur affichage : {e}")
+ 
         self.after(0, update)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1697,48 +1768,65 @@ class VideoCallApp(ctk.CTk):
                 return code
         return "fr"
 
-    def _on_trad_lang_changed(self, choice: str):
-        lang_code = self._get_target_lang_code()
-        if TRANSLATION_AVAILABLE and self.translation_engine:
-            src = self.translation_engine.source_language
-            available_targets = self.translation_engine.get_available_targets(src)
-            new_options = [f"{flag} {name}" for code, name, flag in available_targets]
-            self.trad_lang_menu.configure(values=new_options)
-            self.trad_status_lbl.configure(text="⬤ Changement…", text_color="#e0a030")
-            self.translation_engine.set_target_language(lang_code)
-        lang_label = LANG_NAMES.get(lang_code, lang_code.upper()) if TRANSLATION_AVAILABLE else lang_code
-        print(f"[Translation] Cible : {lang_label}")
+    def _on_trad_lang_changed(self, selection):
+        """Appelée quand l'utilisateur change la langue cible dans le menu."""
+        target_code = self._get_selected_target_lang()
+        if self.translation_engine:
+            # Changer la langue à la volée
+            self.translation_engine.set_target_language(target_code)
+            tgt_name = LANG_NAMES.get(target_code, target_code)
+            self._add_chat_line(f"🌍 Langue cible → {tgt_name}")
+            # Vider la boîte pour repartir proprement
+            self.trad_box.configure(state="normal")
+            self.trad_box.delete("1.0", "end")
+            self.trad_box.configure(state="disabled")
 
     def _toggle_translation(self):
+        """Active ou désactive la traduction (indépendant de la transcription)."""
         if not TRANSLATION_AVAILABLE:
-            msgbox.showerror("Module manquant", "translation_engine.py introuvable.")
+            msgbox.showerror("Module manquant",
+                            "translation_engine.py introuvable.")
             return
+ 
         if self.translation_engine is None:
-            lang_code = self._get_target_lang_code()
-            self.trad_toggle_btn.configure(text="⏳", state="disabled")
-            self.trad_status_lbl.configure(text="⬤ Démarrage…", text_color="#e0a030")
+            # ── ACTIVATION ───────────────────────────────────────────────────────
+            target_code = self._get_selected_target_lang()
             self.translation_engine = TranslationEngine(
-                on_translated=self._on_translated,
-                on_pack_ready=self._on_translation_pack_ready)
-            detected_src = "auto"
-            if self.transcription_engine and hasattr(self.transcription_engine, "_last_lang"):
-                detected_src = self.transcription_engine._last_lang or "auto"
-            ok = self.translation_engine.start(source_lang=detected_src, target_lang=lang_code)
+                on_translated=self._on_translated
+            )
+            ok = self.translation_engine.start(
+                source_lang="auto", target_lang=target_code)
+ 
             if ok:
+                self.trad_toggle_btn.configure(
+                    text="⏹ Désactiver", fg_color="#6a1a1a")
+                self.trad_status_lbl.configure(
+                    text="⬤ Actif", text_color="#4caf50")
+                tgt_name = LANG_NAMES.get(target_code, target_code)
+                self._add_chat_line(
+                    f"🌍 Traduction activée → {tgt_name} (Gemini 2.5 Flash)")
+                # Vider la boîte et remettre le texte d'attente
+                self.trad_box.configure(state="normal")
                 self.trad_box.delete("1.0", "end")
-                self.trad_box.configure(text_color="white")
-                self._add_chat_line(f"🌍 Traduction activée → {lang_code.upper()}")
+                self.trad_box.insert("end",
+                    "⏳ Gemini en cours d'initialisation… Les prochains segments "
+                    "de transcription seront traduits automatiquement.\n")
+                self.trad_box.configure(state="disabled")
             else:
+                msgbox.showerror(
+                    "Erreur",
+                    "Impossible de démarrer Gemini.\n"
+                    "Vérifiez votre clé API dans translation_engine.py\n"
+                    "(variable GEMINI_API_KEY)")
                 self.translation_engine = None
-                self.trad_toggle_btn.configure(text="▶ Activer", state="normal",
-                                               fg_color="#1a4a6a")
-                self.trad_status_lbl.configure(text="⬤ Erreur", text_color="#e05050")
-                msgbox.showerror("Erreur", "Impossible de démarrer la traduction.")
         else:
+            # ── DÉSACTIVATION ────────────────────────────────────────────────────
             self.translation_engine.stop()
             self.translation_engine = None
-            self.trad_toggle_btn.configure(text="▶ Activer", fg_color="#1a4a6a")
-            self.trad_status_lbl.configure(text="⬤ Inactif", text_color="#444")
+            self.trad_toggle_btn.configure(
+                text="▶ Activer", fg_color="#1a4a6a")
+            self.trad_status_lbl.configure(
+                text="⬤ Inactif", text_color="#444")
             self._add_chat_line("🌍 Traduction désactivée")
 
     def _on_translation_pack_ready(self, lang_code: str):
